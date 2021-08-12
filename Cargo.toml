@@ -1,0 +1,21 @@
+[package]
+name = "rsh"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+color-eyre = "0.5.11"
+ctrlc = "3.2.0"
+itertools = "0.10.1"
+lalrpop-util = "0.19.6"
+regex = "1.5.4"
+rustyline = "8.2.0"
+shared_child = "0.3.5"
+structopt = "0.3.22"
+thiserror = "1.0.26"
+yansi = "0.5.0"
+
+[build-dependencies]
+lalrpop = "0.19.6"

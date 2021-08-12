@@ -1,0 +1,79 @@
+grammar;
+use crate::{
+	Command,
+	CommandChain,
+	Pipeline,
+	ChainPart,
+	StringValue,
+	VariableDefinition,
+	CommandContext
+};
+
+pub Command: Command<'input> = {
+	<name:StringValue> <args:(<StringValue>)*>  => Command{<>},
+};
+
+Pipeline: Pipeline<'input> = {
+	<mut commands:(<Command> "|")*> <trailing:Command> => {
+		commands.push(trailing);
+		Pipeline{ commands }
+	}
+};
+
+ChainPart: ChainPart<'input> = {
+	<p:Pipeline> => ChainPart::Pipeline(p),
+	"(" <c:CommandChain> ")" => ChainPart::Chain(Box::new(c)),
+};
+
+pub CommandChain: CommandChain<'input> = {
+	<c1:ChainPart> "||" <c2:CommandChain> => CommandChain::Or(c1, Box::new(c2)),
+	<c1:ChainPart> "&&" <c2:CommandChain> => CommandChain::And(c1, Box::new(c2)),
+	<c:Pipeline> => CommandChain::Pipeline(c),
+};
+
+VariableDefinition: VariableDefinition<'input> = {
+	<name:Identifier> "=" <value:StringValue> => VariableDefinition{<>}
+};
+
+pub CommandList: Vec<CommandChain<'input>> = {
+	<mut chains:(<CommandChain> ";")*> <trailing:CommandChain> => {
+		chains.push(trailing);
+		chains
+	}
+};
+
+Identifier: &'input str = {
+	r"\p{XID_Start}\p{XID_continue}*" => <>,
+	r"[\w\d:+\-_/.,]+" => <>,
+};
+
+pub CommandContext: CommandContext<'input> = {
+	"let" <mut variables:(<VariableDefinition> ",")*> <trailing:VariableDefinition?> "in" <commands:CommandList> => {
+		CommandContext{
+			commands,
+			variables: match trailing {
+				None => variables,
+				Some(v) => {variables.push(v); variables}
+			}
+		}
+	},
+	<commands:CommandList> => CommandContext{commands, variables: Vec::new()},
+};
+
+StringValue: StringValue<'input> = {
+	r"\$\p{XID_Start}\p{XID_continue}*" => StringValue::Variable(&<>[1..]),
+	r"[\w\d:+\-_/.,]+" => StringValue::Litteral(<>),
+	<s:r#"'(\\[^\n]|[^'\n])*'"#> => StringValue::Litteral(&s[1..(s.len()-1)]),
+	// TODO: Interpolate normal strings
+	<s:r#""(\\[^\n]|[^'\n])*""#> => StringValue::Litteral(&s[1..(s.len()-1)]),
+};
+
+match {
+	"let",
+	"in",
+} else {
+	r"[\w\d:+\-_/.,]+"
+} else {
+	r"\$\p{XID_Start}\p{XID_continue}*",
+	_,
+}
