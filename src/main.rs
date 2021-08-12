@@ -1,10 +1,14 @@
 #[macro_use]
 extern crate lalrpop_util;
+use bstr::{BStr, BString, ByteSlice};
 use rustyline::{error::ReadlineError, Editor};
+use serde::{Deserialize, Serialize};
 use shared_child::SharedChild;
 use std::{
     borrow::Cow,
     collections::HashMap,
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
     process::{self, ExitStatus, Stdio},
     sync::{Arc, RwLock},
 };
@@ -18,48 +22,75 @@ type ShResult<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("ser/de error: {0}")]
+    Serde(#[from] ron::Error),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StringValue<'input> {
     Litteral(&'input str),
     Variable(&'input str),
+    SubShell(Box<CommandContext<'input>>),
 }
 
 impl<'input> StringValue<'input> {
-    pub fn resolve(&self, context: &ExecutionContext<'input>) -> Cow<'input, str> {
+    pub fn resolve(&self, context: &ExecutionContext<'input>) -> Cow<'input, BStr> {
         match self {
-            Self::Litteral(l) => Cow::from(*l),
+            Self::Litteral(l) => Cow::from(l.as_bytes().as_bstr()),
             Self::Variable(name) => context
                 .variables
                 .get(name)
                 .map(|v| v.stringy(context))
                 .flatten()
                 .unwrap_or_else(|| {
-                    println!("Warning: {} was not defined", name);
-                    Cow::from("")
+                    eprintln!("Warning: {} was not defined", name);
+                    Cow::from(b"".as_bstr())
                 }),
+            Self::SubShell(s) => sub_shell_exec(s, context)
+                .map(Cow::from)
+                .map_err(|e| {
+                    eprintln!("Warning: subshell failed: {}", e);
+                })
+                .unwrap_or(Cow::from(b"".as_bstr())),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+fn sub_shell_exec<'input>(
+    code: &CommandContext<'input>,
+    // TODO: carry context
+    _context: &ExecutionContext<'input>,
+) -> ShResult<BString> {
+    Ok(BString::from(
+        process::Command::new(std::env::current_exe()?)
+            .arg("builtin")
+            .arg("run-ast")
+            .arg(ron::to_string(code)?)
+            .output()?
+            .stdout,
+    ))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Command<'input> {
+    #[serde(borrow)]
     name: StringValue<'input>,
+    #[serde(borrow)]
     args: Vec<StringValue<'input>>,
 }
 
 impl<'input> Command<'input> {
     pub fn prepare(&self, context: &ExecutionContext<'input>) -> process::Command {
-        let mut command = process::Command::new(self.name.resolve(context).as_ref());
+        let mut command = process::Command::new(OsStr::from_bytes(&*self.name.resolve(context)));
         let args: Vec<_> = self.args.iter().map(|v| v.resolve(context)).collect();
-        command.args(args.iter().map(|v| v.as_ref()));
+        command.args(args.iter().map(|v| OsStr::from_bytes(v)));
         command
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pipeline<'input> {
+    #[serde(borrow)]
     commands: Vec<Command<'input>>,
 }
 
@@ -108,9 +139,11 @@ impl<'input> Pipeline<'input> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ChainPart<'input> {
+    #[serde(borrow)]
     Pipeline(Pipeline<'input>),
+    #[serde(borrow)]
     Chain(Box<CommandChain<'input>>),
 }
 
@@ -123,10 +156,11 @@ impl<'input> ChainPart<'input> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CommandChain<'input> {
     Or(ChainPart<'input>, Box<CommandChain<'input>>),
     And(ChainPart<'input>, Box<CommandChain<'input>>),
+    #[serde(borrow)]
     Pipeline(Pipeline<'input>),
 }
 
@@ -154,15 +188,17 @@ impl<'input> CommandChain<'input> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VariableDefinition<'input> {
     name: &'input str,
     value: StringValue<'input>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommandContext<'input> {
+    #[serde(borrow)]
     commands: Vec<CommandChain<'input>>,
+    #[serde(borrow)]
     variables: Vec<VariableDefinition<'input>>,
 }
 
@@ -172,7 +208,7 @@ impl<'input> CommandContext<'input> {
             variables: self
                 .variables
                 .iter()
-                .map(|def| (def.name, Value::String(def.value)))
+                .map(|def| (def.name, Value::String(def.value.clone())))
                 .collect(),
             shell_ctx,
         }
@@ -187,13 +223,13 @@ impl<'input> CommandContext<'input> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Value<'input> {
     String(StringValue<'input>),
 }
 
 impl<'input> Value<'input> {
-    pub fn stringy(&self, context: &ExecutionContext<'input>) -> Option<Cow<'input, str>> {
+    pub fn stringy(&self, context: &ExecutionContext<'input>) -> Option<Cow<'input, BStr>> {
         match self {
             Value::String(s) => Some(s.resolve(context)),
         }
@@ -216,13 +252,6 @@ impl ShellContext {
         }
     }
 }
-
-#[derive(StructOpt)]
-struct Args {
-    #[structopt(short, long)]
-    command: Option<String>,
-}
-
 macro_rules! report {
     ($e:expr) => {
         match $e {
@@ -276,6 +305,25 @@ fn interactive_loop<E: rustyline::Helper>(
     }
 }
 
+#[derive(StructOpt)]
+struct Args {
+    #[structopt(short, long)]
+    command: Option<String>,
+    #[structopt(subcommand)]
+    sub_command: Option<SubCommands>,
+}
+
+#[derive(StructOpt)]
+enum SubCommands {
+    Builtin(Builtin),
+}
+
+#[derive(StructOpt)]
+enum Builtin {
+    Ast { code: String },
+    RunAst { ast: String },
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let args = Args::from_args();
@@ -294,7 +342,20 @@ fn main() -> color_eyre::Result<()> {
         }
     })?;
 
-    if let Some(command) = &args.command {
+    if let Some(subcommand) = &args.sub_command {
+        match subcommand {
+            SubCommands::Builtin(builtin) => match builtin {
+                Builtin::Ast { code } => {
+                    let parsed = report!(rsh::CommandContextParser::new().parse(code));
+                    println!("{}", ron::to_string(&parsed)?);
+                }
+                Builtin::RunAst { ast } => {
+                    let ast: CommandContext<'_> = ron::from_str(ast)?;
+                    ast.execute(&mut shell_ctx)?;
+                }
+            },
+        }
+    } else if let Some(command) = &args.command {
         let command_parser = rsh::CommandContextParser::new();
         dbg!(report!(command_parser.parse(&command)));
     } else {

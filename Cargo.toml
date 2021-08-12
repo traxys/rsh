@@ -6,12 +6,15 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bstr = "0.2.16"
 color-eyre = "0.5.11"
 ctrlc = "3.2.0"
 itertools = "0.10.1"
 lalrpop-util = "0.19.6"
 regex = "1.5.4"
+ron = "0.6.4"
 rustyline = "8.2.0"
+serde = { version = "1.0.127", features = ["derive"] }
 shared_child = "0.3.5"
 structopt = "0.3.22"
 thiserror = "1.0.26"

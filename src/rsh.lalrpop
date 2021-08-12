@@ -61,6 +61,7 @@ pub CommandContext: CommandContext<'input> = {
 };
 
 StringValue: StringValue<'input> = {
+	"$" "(" <cmd:CommandContext> ")" => StringValue::SubShell(Box::new(cmd)),
 	r"\$\p{XID_Start}\p{XID_continue}*" => StringValue::Variable(&<>[1..]),
 	r"[\w\d:+\-_/.,]+" => StringValue::Litteral(<>),
 	<s:r#"'(\\[^\n]|[^'\n])*'"#> => StringValue::Litteral(&s[1..(s.len()-1)]),
