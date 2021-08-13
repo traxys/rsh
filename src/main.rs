@@ -294,7 +294,7 @@ impl<'input> CommandContext<'input> {
     fn execute(&self, sh_ctx: &'input mut ShellContext) -> ShResult<()> {
         let context = self.define_context(sh_ctx);
         for command in &self.commands {
-            command.execute(&context)?;
+            context.shell_ctx.last_exit = Some(command.execute(&context)?);
         }
         Ok(())
     }
@@ -303,12 +303,14 @@ impl<'input> CommandContext<'input> {
 #[derive(Clone, Debug)]
 enum Value<'input> {
     String(StringValue<'input>),
+    Int(i64),
 }
 
 impl<'input> Value<'input> {
-    pub fn stringy(&self, context: &ExecutionContext<'input>) -> Option<Cow<'input, BStr>> {
+    pub fn stringy(&self, context: &ExecutionContext<'input>) -> Cow<'input, BStr> {
         match self {
-            Value::String(s) => Some(s.resolve(context)),
+            Value::String(s) => s.resolve(context),
+            Value::Int(i) => Cow::from(BString::from(i.to_string().into_bytes())),
         }
     }
 }
@@ -320,27 +322,35 @@ pub struct ExecutionContext<'input> {
 
 impl<'input> ExecutionContext<'input> {
     fn resolve(&self, name: &'input str) -> Option<Cow<'_, Value<'input>>> {
-        self.variables
-            .get(name)
-            .map(|var| Cow::Borrowed(var))
-            .or_else(|| {
-                std::env::var_os(name).map(|v| {
-                    Cow::Owned(Value::String(StringValue::Env(
-                        Vec::from_os_string(v)
-                            .map(|v| BString::from(v))
-                            .unwrap_or_else(|_| {
-                                eprintln!("Warning: could not read env var {}", name);
-                                BString::from(Vec::new())
-                            }),
-                    )))
-                })
-            })
+        match name {
+            "exit" => self
+                .shell_ctx
+                .last_exit
+                .map(|v| v.code())
+                .flatten()
+                .map(|v| Cow::Owned(Value::Int(v as i64))),
+            _ => self
+                .variables
+                .get(name)
+                .map(|var| Cow::Borrowed(var))
+                .or_else(|| {
+                    std::env::var_os(name).map(|v| {
+                        Cow::Owned(Value::String(StringValue::Env(
+                            Vec::from_os_string(v)
+                                .map(|v| BString::from(v))
+                                .unwrap_or_else(|_| {
+                                    eprintln!("Warning: could not read env var {}", name);
+                                    BString::from(Vec::new())
+                                }),
+                        )))
+                    })
+                }),
+        }
     }
 
     fn resolve_text(&self, name: &'input str) -> Cow<'input, BStr> {
         self.resolve(name)
             .map(|val| val.stringy(self))
-            .flatten()
             .unwrap_or_else(|| {
                 eprintln!("Warning: {} was not defined", name);
                 Cow::Borrowed(b"".as_bstr())
@@ -350,12 +360,14 @@ impl<'input> ExecutionContext<'input> {
 
 pub struct ShellContext {
     current_process: Arc<RwLock<Option<SharedChild>>>,
+    last_exit: Option<ExitStatus>,
 }
 
 impl ShellContext {
     pub fn new() -> Self {
         ShellContext {
             current_process: Arc::new(RwLock::new(None)),
+            last_exit: None,
         }
     }
 }
