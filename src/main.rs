@@ -352,7 +352,9 @@ impl<'input> ExecutionContext<'input> {
         self.resolve(name)
             .map(|val| val.stringy(self))
             .unwrap_or_else(|| {
-                eprintln!("Warning: {} was not defined", name);
+                if name != "exit" {
+                    eprintln!("Warning: {} was not defined", name);
+                }
                 Cow::Borrowed(b"".as_bstr())
             })
     }
@@ -406,12 +408,20 @@ fn interactive_loop<E: rustyline::Helper>(
     sh_ctx: &mut ShellContext,
     prompt_command: Option<&str>,
 ) -> color_eyre::Result<i32> {
+    let command_parser = rsh::CommandParser::new();
     loop {
         let prompt = prompt_command
-            .map(|command| {
-                process::Command::new(command)
-                    .output()
+            .map(|command| -> color_eyre::Result<_> {
+                let parsed = command_parser
+                    .parse(command)
+                    .map_err(|err| color_eyre::eyre::eyre!("could not parse prompt: {}", err))?;
+                let mut cmd = parsed.prepare(&ExecutionContext {
+                    variables: HashMap::new(),
+                    shell_ctx: sh_ctx,
+                })?;
+                cmd.output()
                     .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+                    .map_err(Into::into)
             })
             .unwrap_or_else(|| Ok(String::from(">> ")))?;
 
