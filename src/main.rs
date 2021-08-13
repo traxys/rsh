@@ -352,7 +352,10 @@ macro_rules! report {
     };
 }
 
-fn interactive_input(sh_ctx: &mut ShellContext) -> color_eyre::Result<i32> {
+fn interactive_input(
+    sh_ctx: &mut ShellContext,
+    prompt_command: Option<&str>,
+) -> color_eyre::Result<i32> {
     let mut rl: Editor<()> = Editor::with_config(
         rustyline::Config::builder()
             .auto_add_history(true)
@@ -365,7 +368,7 @@ fn interactive_input(sh_ctx: &mut ShellContext) -> color_eyre::Result<i32> {
         Err(ReadlineError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(e) => Err(e)?,
     }
-    let res = interactive_loop(&mut rl, sh_ctx);
+    let res = interactive_loop(&mut rl, sh_ctx, prompt_command);
     rl.save_history("/home/traxys/.rsh-history")?;
     res
 }
@@ -373,9 +376,18 @@ fn interactive_input(sh_ctx: &mut ShellContext) -> color_eyre::Result<i32> {
 fn interactive_loop<E: rustyline::Helper>(
     rl: &mut rustyline::Editor<E>,
     sh_ctx: &mut ShellContext,
+    prompt_command: Option<&str>,
 ) -> color_eyre::Result<i32> {
     loop {
-        let readline = rl.readline(">> ");
+        let prompt = prompt_command
+            .map(|command| {
+                process::Command::new(command)
+                    .output()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            })
+            .unwrap_or_else(|| Ok(String::from(">> ")))?;
+
+        let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
                 let parsed = match rsh::CommandContextParser::new().parse(&line) {
@@ -404,6 +416,8 @@ struct Args {
     command: Option<String>,
     #[structopt(subcommand)]
     sub_command: Option<SubCommands>,
+    #[structopt(short, long)]
+    prompt_command: Option<String>,
 }
 
 #[derive(StructOpt)]
@@ -469,7 +483,7 @@ fn main() -> color_eyre::Result<()> {
         let command_parser = rsh::CommandContextParser::new();
         dbg!(report!(command_parser.parse(&command)));
     } else {
-        let exit = interactive_input(&mut shell_ctx)?;
+        let exit = interactive_input(&mut shell_ctx, args.prompt_command.as_deref())?;
         process::exit(exit);
     }
 
