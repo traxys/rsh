@@ -48,7 +48,7 @@ impl<'input> StringPart<'input> {
             if mtch.start() != idx {
                 interpolation.push(Self::Text(&s[idx..mtch.start()]));
             }
-            idx = mtch.end() + 1;
+            idx = mtch.end();
             interpolation.push(Self::Variable(&mtch.as_str()[1..]));
         }
         if idx < s.len() {
