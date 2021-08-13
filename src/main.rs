@@ -1,6 +1,8 @@
 #[macro_use]
 extern crate lalrpop_util;
 use bstr::{BStr, BString, ByteSlice};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use rustyline::{error::ReadlineError, Editor};
 use serde::{Deserialize, Serialize};
 use shared_child::SharedChild;
@@ -13,6 +15,7 @@ use std::{
 use structopt::StructOpt;
 
 lalrpop_mod!(pub rsh);
+lalrpop_mod!(pub fstring);
 
 type ShResult<T, E = Error> = std::result::Result<T, E>;
 
@@ -28,10 +31,61 @@ pub enum Error {
     Parse(String),
 }
 
+static VARIABLE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+").unwrap());
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum StringPart<'input> {
+    Text(&'input str),
+    Variable(&'input str),
+}
+
+impl<'input> StringPart<'input> {
+    pub fn interpolate(s: &'input str) -> Vec<Self> {
+        let mut idx = 0;
+        let mut interpolation = Vec::new();
+
+        for mtch in VARIABLE_REGEX.find_iter(s) {
+            if mtch.start() != idx {
+                interpolation.push(Self::Text(&s[idx..mtch.start()]));
+            }
+            idx = mtch.end() + 1;
+            interpolation.push(Self::Variable(&mtch.as_str()[1..]));
+        }
+        if idx < s.len() {
+            interpolation.push(Self::Text(&s[idx..]))
+        }
+
+        interpolation
+    }
+
+    pub fn resolve(
+        fstring: &[StringPart<'input>],
+        context: &ExecutionContext<'input>,
+    ) -> Cow<'input, BStr> {
+        match fstring {
+            [Self::Text(v)] => v.as_bytes().as_bstr().into(),
+            [Self::Variable(v)] => context.resolve_text(v),
+            _ => fstring
+                .iter()
+                .fold(BString::from(Vec::new()), |mut current, segment| {
+                    match segment {
+                        StringPart::Text(s) => current.extend_from_slice(s.as_bytes()),
+                        StringPart::Variable(v) => {
+                            current.extend_from_slice(&context.resolve_text(v))
+                        }
+                    }
+                    current
+                })
+                .into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StringValue<'input> {
     Litteral(&'input str),
     Variable(&'input str),
+    Interpolated(Vec<StringPart<'input>>),
     SubShell(Box<CommandContext<'input>>),
 }
 
@@ -39,21 +93,14 @@ impl<'input> StringValue<'input> {
     pub fn resolve(&self, context: &ExecutionContext<'input>) -> Cow<'input, BStr> {
         match self {
             Self::Litteral(l) => Cow::from(l.as_bytes().as_bstr()),
-            Self::Variable(name) => context
-                .variables
-                .get(name)
-                .map(|v| v.stringy(context))
-                .flatten()
-                .unwrap_or_else(|| {
-                    eprintln!("Warning: {} was not defined", name);
-                    Cow::from(b"".as_bstr())
-                }),
+            Self::Variable(name) => context.resolve_text(name),
             Self::SubShell(s) => sub_shell_exec(s, context)
                 .map(Cow::from)
                 .map_err(|e| {
                     eprintln!("Warning: subshell failed: {}", e);
                 })
                 .unwrap_or(Cow::from(b"".as_bstr())),
+            StringValue::Interpolated(f) => StringPart::resolve(f, context).into(),
         }
     }
 }
@@ -98,7 +145,13 @@ impl<'input> Command<'input> {
             }
         }
 
-        let mut command = process::Command::new(name.to_os_str_lossy());
+        let mut command;
+        if Builtin::is(&name) {
+            command = process::Command::new(std::env::current_exe()?);
+            command.arg("builtin").arg(name.to_os_str_lossy());
+        } else {
+            command = process::Command::new(name.to_os_str_lossy());
+        }
         let args: Vec<_> = self.args.iter().map(|v| v.resolve(context)).collect();
         command.args(args.iter().map(|v| v.to_os_str_lossy()));
         Ok(command)
@@ -263,6 +316,22 @@ pub struct ExecutionContext<'input> {
     shell_ctx: &'input mut ShellContext,
 }
 
+impl<'input> ExecutionContext<'input> {
+    fn resolve(&self, name: &'input str) -> Option<&Value<'input>> {
+        self.variables.get(name)
+    }
+
+    fn resolve_text(&self, name: &'input str) -> Cow<'input, BStr> {
+        self.resolve(name)
+            .map(|val| val.stringy(self))
+            .flatten()
+            .unwrap_or_else(|| {
+                eprintln!("Warning: {} was not defined", name);
+                Cow::Borrowed(b"".as_bstr())
+            })
+    }
+}
+
 pub struct ShellContext {
     current_process: Arc<RwLock<Option<SharedChild>>>,
 }
@@ -364,6 +433,13 @@ impl Builtin {
         }
 
         Ok(())
+    }
+
+    pub fn is(name: &[u8]) -> bool {
+        match name {
+            b"ast" | b"run-ast" => true,
+            _ => false,
+        }
     }
 }
 

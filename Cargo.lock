@@ -636,6 +636,7 @@ dependencies = [
  "itertools",
  "lalrpop",
  "lalrpop-util",
+ "once_cell",
  "regex",
  "ron",
  "rustyline",

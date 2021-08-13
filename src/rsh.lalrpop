@@ -6,8 +6,11 @@ use crate::{
 	ChainPart,
 	StringValue,
 	VariableDefinition,
-	CommandContext
+	CommandContext,
+	StringPart,
 };
+use lalrpop_util::ParseError;
+use regex::Regex;
 
 pub Command: Command<'input> = {
 	<name:StringValue> <args:(<StringValue>)*>  => Command{<>},
@@ -43,8 +46,7 @@ pub CommandList: Vec<CommandChain<'input>> = {
 };
 
 Identifier: &'input str = {
-	r"\p{XID_Start}\p{XID_continue}*" => <>,
-	r"[\w\d:+\-_/.,]+" => <>,
+	Word =>? if Regex::new(r"[:+\-/.,]").unwrap().is_match(<>) { Err(ParseError::User{error: "invalid identifer"}) } else { Ok(<>) },
 };
 
 pub CommandContext: CommandContext<'input> = {
@@ -60,21 +62,23 @@ pub CommandContext: CommandContext<'input> = {
 	<commands:CommandList> => CommandContext{commands, variables: Vec::new()},
 };
 
+Word: &'input str = {
+	r"[\w\d:+\-_/.,$]+" => <>,
+}
+
 StringValue: StringValue<'input> = {
-	"$" "(" <cmd:CommandContext> ")" => StringValue::SubShell(Box::new(cmd)),
-	r"\$\p{XID_Start}\p{XID_continue}*" => StringValue::Variable(&<>[1..]),
-	r"[\w\d:+\-_/.,]+" => StringValue::Litteral(<>),
+	"$(" <cmd:CommandContext> ")" => StringValue::SubShell(Box::new(cmd)),
 	<s:r#"'(\\[^\n]|[^'\n])*'"#> => StringValue::Litteral(&s[1..(s.len()-1)]),
-	// TODO: Interpolate normal strings
-	<s:r#""(\\[^\n]|[^'\n])*""#> => StringValue::Litteral(&s[1..(s.len()-1)]),
+	Word => StringValue::Interpolated(StringPart::interpolate(<>)),
+	<s:r#""(\\[^\n]|[^"\n])*""#> => StringValue::Interpolated(StringPart::interpolate(&s[1..(s.len()-1)])),
 };
 
 match {
 	"let",
 	"in",
 } else {
-	r"[\w\d:+\-_/.,]+"
+	r"[\w\d:+\-_/.,$]+",
 } else {
-	r"\$\p{XID_Start}\p{XID_continue}*",
+	r"[a-zA-Z_0-9]+",
 	_,
 }
