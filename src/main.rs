@@ -7,8 +7,6 @@ use shared_child::SharedChild;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    ffi::OsStr,
-    os::unix::ffi::OsStrExt,
     process::{self, ExitStatus, Stdio},
     sync::{Arc, RwLock},
 };
@@ -24,6 +22,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("ser/de error: {0}")]
     Serde(#[from] ron::Error),
+    #[error("called exit: {0}")]
+    Exited(i32),
+    #[error("parse error: {0}")]
+    Parse(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,11 +82,26 @@ pub struct Command<'input> {
 }
 
 impl<'input> Command<'input> {
-    pub fn prepare(&self, context: &ExecutionContext<'input>) -> process::Command {
-        let mut command = process::Command::new(OsStr::from_bytes(&*self.name.resolve(context)));
+    pub fn prepare(&self, context: &ExecutionContext<'input>) -> ShResult<process::Command> {
+        let name = self.name.resolve(context);
+        if name == b"exit".as_bstr() {
+            if self.args.len() > 1 {
+                return Err(Error::Exited(255));
+            }
+            match self
+                .args
+                .first()
+                .map(|v| v.resolve(context).to_str().map(|s| s.parse()))
+            {
+                Some(Ok(Ok(v))) => return Err(Error::Exited(v)),
+                _ => return Err(Error::Exited(255)),
+            }
+        }
+
+        let mut command = process::Command::new(name.to_os_str_lossy());
         let args: Vec<_> = self.args.iter().map(|v| v.resolve(context)).collect();
-        command.args(args.iter().map(|v| OsStr::from_bytes(v)));
-        command
+        command.args(args.iter().map(|v| v.to_os_str_lossy()));
+        Ok(command)
     }
 }
 
@@ -96,7 +113,12 @@ pub struct Pipeline<'input> {
 
 impl<'input> Pipeline<'input> {
     pub fn execute(&self, context: &ExecutionContext<'input>) -> ShResult<ExitStatus> {
-        let mut prepared: Vec<_> = self.commands.iter().map(|c| c.prepare(context)).collect();
+        let mut prepared: Vec<_> = self
+            .commands
+            .iter()
+            .map(|c| c.prepare(context))
+            .collect::<ShResult<_>>()?;
+
         //let mut children = Vec::new();
         if prepared.len() == 1 {
             let command = SharedChild::spawn(&mut prepared[0])?;
@@ -261,7 +283,7 @@ macro_rules! report {
     };
 }
 
-fn interactive_input(sh_ctx: &mut ShellContext) -> color_eyre::Result<()> {
+fn interactive_input(sh_ctx: &mut ShellContext) -> color_eyre::Result<i32> {
     let mut rl: Editor<()> = Editor::with_config(
         rustyline::Config::builder()
             .auto_add_history(true)
@@ -282,7 +304,7 @@ fn interactive_input(sh_ctx: &mut ShellContext) -> color_eyre::Result<()> {
 fn interactive_loop<E: rustyline::Helper>(
     rl: &mut rustyline::Editor<E>,
     sh_ctx: &mut ShellContext,
-) -> color_eyre::Result<()> {
+) -> color_eyre::Result<i32> {
     loop {
         let readline = rl.readline(">> ");
         match readline {
@@ -294,12 +316,14 @@ fn interactive_loop<E: rustyline::Helper>(
                     }
                     Ok(v) => v,
                 };
-                if let Err(e) = parsed.execute(sh_ctx) {
-                    println!("  Execution Error: {}", yansi::Paint::red(e))
+                match parsed.execute(sh_ctx) {
+                    Err(Error::Exited(v)) => return Ok(v),
+                    Err(e) => println!("  Execution Error: {}", yansi::Paint::red(e)),
+                    Ok(_) => (),
                 }
             }
             Err(ReadlineError::Interrupted) => println!("Interrupted"),
-            Err(ReadlineError::Eof) => return Ok(()),
+            Err(ReadlineError::Eof) => return Ok(0),
             Err(err) => Err(err)?,
         }
     }
@@ -324,6 +348,25 @@ enum Builtin {
     RunAst { ast: String },
 }
 
+impl Builtin {
+    pub fn execute(&self, shell_ctx: &mut ShellContext) -> ShResult<()> {
+        match self {
+            Builtin::Ast { code } => {
+                let parsed = rsh::CommandContextParser::new()
+                    .parse(code)
+                    .map_err(|err| Error::Parse(err.to_string()))?;
+                println!("{}", ron::to_string(&parsed)?);
+            }
+            Builtin::RunAst { ast } => {
+                let ast: CommandContext<'_> = ron::from_str(ast)?;
+                ast.execute(shell_ctx)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let args = Args::from_args();
@@ -344,22 +387,14 @@ fn main() -> color_eyre::Result<()> {
 
     if let Some(subcommand) = &args.sub_command {
         match subcommand {
-            SubCommands::Builtin(builtin) => match builtin {
-                Builtin::Ast { code } => {
-                    let parsed = report!(rsh::CommandContextParser::new().parse(code));
-                    println!("{}", ron::to_string(&parsed)?);
-                }
-                Builtin::RunAst { ast } => {
-                    let ast: CommandContext<'_> = ron::from_str(ast)?;
-                    ast.execute(&mut shell_ctx)?;
-                }
-            },
+            SubCommands::Builtin(builtin) => builtin.execute(&mut shell_ctx)?,
         }
     } else if let Some(command) = &args.command {
         let command_parser = rsh::CommandContextParser::new();
         dbg!(report!(command_parser.parse(&command)));
     } else {
-        interactive_input(&mut shell_ctx)?;
+        let exit = interactive_input(&mut shell_ctx)?;
+        process::exit(exit);
     }
 
     Ok(())
