@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate lalrpop_util;
-use bstr::{BStr, BString, ByteSlice};
+use bstr::{BStr, BString, ByteSlice, ByteVec};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rustyline::{error::ReadlineError, Editor};
@@ -87,6 +87,7 @@ pub enum StringValue<'input> {
     Variable(&'input str),
     Interpolated(Vec<StringPart<'input>>),
     SubShell(Box<CommandContext<'input>>),
+    Env(BString),
 }
 
 impl<'input> StringValue<'input> {
@@ -101,6 +102,7 @@ impl<'input> StringValue<'input> {
                 })
                 .unwrap_or(Cow::from(b"".as_bstr())),
             StringValue::Interpolated(f) => StringPart::resolve(f, context).into(),
+            Self::Env(e) => Cow::Owned(e.clone()),
         }
     }
 }
@@ -317,8 +319,22 @@ pub struct ExecutionContext<'input> {
 }
 
 impl<'input> ExecutionContext<'input> {
-    fn resolve(&self, name: &'input str) -> Option<&Value<'input>> {
-        self.variables.get(name)
+    fn resolve(&self, name: &'input str) -> Option<Cow<'_, Value<'input>>> {
+        self.variables
+            .get(name)
+            .map(|var| Cow::Borrowed(var))
+            .or_else(|| {
+                std::env::var_os(name).map(|v| {
+                    Cow::Owned(Value::String(StringValue::Env(
+                        Vec::from_os_string(v)
+                            .map(|v| BString::from(v))
+                            .unwrap_or_else(|_| {
+                                eprintln!("Warning: could not read env var {}", name);
+                                BString::from(Vec::new())
+                            }),
+                    )))
+                })
+            })
     }
 
     fn resolve_text(&self, name: &'input str) -> Cow<'input, BStr> {
