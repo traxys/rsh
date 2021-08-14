@@ -1,22 +1,23 @@
 #[macro_use]
 extern crate lalrpop_util;
-use bstr::{BStr, BString, ByteSlice, ByteVec};
+use lasso::{Rodeo, Spur};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use runtime::RuntimeCtx;
 use rustyline::{error::ReadlineError, Editor};
 use serde::{Deserialize, Serialize};
 use shared_child::SharedChild;
 use std::{
-    borrow::Cow,
-    collections::HashMap,
-    fs::{File, OpenOptions},
     path::PathBuf,
-    process::{self, ExitStatus, Stdio},
+    process::{self, ExitStatus},
     sync::{Arc, RwLock},
 };
 use structopt::StructOpt;
 
+use crate::runtime::RuntimeError;
+
 pub mod lexer;
+pub mod runtime;
 
 lalrpop_mod!(pub rsh);
 
@@ -34,6 +35,8 @@ pub enum Error {
     Parse(String),
     #[error("type error: expected {expected} got {got}")]
     TypeError { expected: Type, got: Type },
+    #[error("runtime error")]
+    RuntimeError(#[from] runtime::RuntimeError),
 }
 
 static VARIABLE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+").unwrap());
@@ -41,11 +44,11 @@ static VARIABLE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+")
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StringPart<'input> {
     Text(&'input str),
-    Variable(&'input str),
+    Variable(Spur),
 }
 
 impl<'input> StringPart<'input> {
-    pub fn interpolate(s: &'input str) -> Vec<Self> {
+    pub fn interpolate(s: &'input str, ctx: &mut ShellContext) -> Vec<Self> {
         let mut idx = 0;
         let mut interpolation = Vec::new();
 
@@ -54,7 +57,7 @@ impl<'input> StringPart<'input> {
                 interpolation.push(Self::Text(&s[idx..mtch.start()]));
             }
             idx = mtch.end();
-            interpolation.push(Self::Variable(&mtch.as_str()[1..]));
+            interpolation.push(Self::Variable(ctx.rodeo.get_or_intern(&mtch.as_str()[1..])));
         }
         if idx < s.len() {
             interpolation.push(Self::Text(&s[idx..]))
@@ -62,69 +65,6 @@ impl<'input> StringPart<'input> {
 
         interpolation
     }
-
-    pub fn resolve(
-        fstring: &[StringPart<'input>],
-        context: &ExecutionContext<'input>,
-    ) -> Cow<'input, BStr> {
-        match fstring {
-            [Self::Text(v)] => v.as_bytes().as_bstr().into(),
-            [Self::Variable(v)] => context.resolve_text(v),
-            _ => fstring
-                .iter()
-                .fold(BString::from(Vec::new()), |mut current, segment| {
-                    match segment {
-                        StringPart::Text(s) => current.extend_from_slice(s.as_bytes()),
-                        StringPart::Variable(v) => {
-                            current.extend_from_slice(&context.resolve_text(v))
-                        }
-                    }
-                    current
-                })
-                .into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum StringValue<'input> {
-    Litteral(&'input str),
-    // Variable(&'input str),
-    Interpolated(Vec<StringPart<'input>>),
-    SubShell(Box<CommandContext<'input>>),
-    Env(BString),
-}
-
-impl<'input> StringValue<'input> {
-    pub fn resolve(&self, context: &ExecutionContext<'input>) -> Cow<'input, BStr> {
-        match self {
-            Self::Litteral(l) => Cow::from(l.as_bytes().as_bstr()),
-            // Self::Variable(name) => context.resolve_text(name),
-            Self::SubShell(s) => sub_shell_exec(s, context)
-                .map(Cow::from)
-                .map_err(|e| {
-                    eprintln!("Warning: subshell failed: {}", e);
-                })
-                .unwrap_or(Cow::from(b"".as_bstr())),
-            StringValue::Interpolated(f) => StringPart::resolve(f, context).into(),
-            Self::Env(e) => Cow::Owned(e.clone()),
-        }
-    }
-}
-
-fn sub_shell_exec<'input>(
-    code: &CommandContext<'input>,
-    // TODO: carry context
-    _context: &ExecutionContext<'input>,
-) -> ShResult<BString> {
-    Ok(BString::from(
-        process::Command::new(std::env::current_exe()?)
-            .arg("builtin")
-            .arg("run-ast")
-            .arg(ron::to_string(code)?)
-            .output()?
-            .stdout,
-    ))
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -137,115 +77,17 @@ enum RedirectionType {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Command<'input> {
     #[serde(borrow)]
-    name: StringValue<'input>,
+    name: Expression<'input>,
     #[serde(borrow)]
-    args: Vec<Value<'input>>,
+    args: Vec<Expression<'input>>,
     #[serde(borrow)]
-    redirections: Vec<(RedirectionType, Value<'input>)>,
-}
-
-impl<'input> Command<'input> {
-    pub fn prepare(&self, context: &ExecutionContext<'input>) -> ShResult<process::Command> {
-        let name = self.name.resolve(context);
-        if name == b"exit".as_bstr() {
-            if self.args.len() > 1 {
-                return Err(Error::Exited(255));
-            }
-            match self
-                .args
-                .first()
-                .map(|v| v.stringy(context).to_str().map(|s| s.parse()))
-            {
-                Some(Ok(Ok(v))) => return Err(Error::Exited(v)),
-                _ => return Err(Error::Exited(255)),
-            }
-        }
-
-        let mut command;
-        if Builtin::is(&name) {
-            command = process::Command::new(std::env::current_exe()?);
-            command.arg("builtin").arg(name.to_os_str_lossy());
-        } else {
-            command = process::Command::new(name.to_os_str_lossy());
-        }
-        let args: Vec<_> = self.args.iter().map(|v| v.stringy(context)).collect();
-        command.args(args.iter().map(|v| v.to_os_str_lossy()));
-        for (ty, path) in &self.redirections {
-            let path = path.stringy(context);
-            let path = path.to_path_lossy();
-            match ty {
-                RedirectionType::In => {
-                    let file = File::open(path)?;
-                    command.stdin(file);
-                }
-                RedirectionType::Out => {
-                    let file = OpenOptions::new().create(true).write(true).open(path)?;
-                    command.stdout(file);
-                }
-                RedirectionType::Append => {
-                    let file = OpenOptions::new().create(true).append(true).open(path)?;
-                    command.stdout(file);
-                }
-            }
-        }
-        Ok(command)
-    }
+    redirections: Vec<(RedirectionType, Expression<'input>)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pipeline<'input> {
     #[serde(borrow)]
     commands: Vec<Command<'input>>,
-}
-
-impl<'input> Pipeline<'input> {
-    pub fn execute(&self, context: &ExecutionContext<'input>) -> ShResult<ExitStatus> {
-        let mut prepared: Vec<_> = self
-            .commands
-            .iter()
-            .map(|c| c.prepare(context))
-            .collect::<ShResult<_>>()?;
-
-        //let mut children = Vec::new();
-        if prepared.len() == 1 {
-            let command = SharedChild::spawn(&mut prepared[0])?;
-            *context.shell_ctx.current_process.write().unwrap() = Some(command);
-            context
-                .shell_ctx
-                .current_process
-                .read()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .wait()
-                .map_err(Into::into)
-        } else {
-            let mut children = vec![prepared[0].stdout(Stdio::piped()).spawn()?];
-            let len = prepared.len();
-            if len > 2 {
-                for command in &mut prepared[1..len - 1] {
-                    let com = command
-                        .stdin(children.last_mut().unwrap().stdout.take().unwrap())
-                        .stdout(Stdio::piped())
-                        .spawn()?;
-                    children.push(com)
-                }
-            }
-
-            let res = prepared
-                .last_mut()
-                .unwrap()
-                .stdin(children.last_mut().unwrap().stdout.take().unwrap())
-                .status()
-                .map_err(Into::into);
-
-            children.iter_mut().for_each(|p| {
-                let _ = p.kill();
-            });
-
-            res
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -256,15 +98,6 @@ pub enum ChainPart<'input> {
     Chain(Box<CommandChain<'input>>),
 }
 
-impl<'input> ChainPart<'input> {
-    pub fn execute(&self, context: &ExecutionContext<'input>) -> ShResult<ExitStatus> {
-        match self {
-            ChainPart::Pipeline(p) => p.execute(context),
-            ChainPart::Chain(c) => c.execute(context),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CommandChain<'input> {
     Or(ChainPart<'input>, Box<CommandChain<'input>>),
@@ -273,35 +106,12 @@ pub enum CommandChain<'input> {
     Pipeline(Pipeline<'input>),
 }
 
-impl<'input> CommandChain<'input> {
-    pub fn execute(&self, context: &ExecutionContext) -> ShResult<ExitStatus> {
-        match self {
-            CommandChain::Or(c, rest) => {
-                let result = c.execute(context)?;
-                if result.success() {
-                    Ok(result)
-                } else {
-                    rest.execute(context)
-                }
-            }
-            CommandChain::And(c, rest) => {
-                let result = c.execute(context)?;
-                if result.success() {
-                    rest.execute(context)
-                } else {
-                    Ok(result)
-                }
-            }
-            CommandChain::Pipeline(p) => p.execute(context),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Type {
     Dynamic,
     Int,
     String,
+    Bytes,
 }
 
 impl std::fmt::Display for Type {
@@ -310,14 +120,16 @@ impl std::fmt::Display for Type {
             Type::Dynamic => write!(f, "any"),
             Type::Int => write!(f, "int"),
             Type::String => write!(f, "str"),
+            Type::Bytes => write!(f, "bytes"),
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VariableDefinition<'input> {
-    name: &'input str,
-    value: Value<'input>,
+    name: Spur,
+    #[serde(borrow)]
+    expr: Expression<'input>,
     ty: Type,
 }
 
@@ -329,54 +141,13 @@ pub struct CommandContext<'input> {
     variables: Vec<VariableDefinition<'input>>,
 }
 
-impl<'input> CommandContext<'input> {
-    fn define_context(
-        &self,
-        shell_ctx: &'input mut ShellContext,
-    ) -> ShResult<ExecutionContext<'input>> {
-        Ok(ExecutionContext {
-            variables: self
-                .variables
-                .iter()
-                .map(|def| {
-                    if !def.value.typechecks(def.ty) {
-                        Err(Error::TypeError {
-                            expected: def.ty,
-                            got: def.value.ty(),
-                        })
-                    } else {
-                        Ok((def.name, def.value.clone()))
-                    }
-                })
-                .collect::<ShResult<_>>()?,
-            shell_ctx,
-        })
-    }
-
-    fn execute(&self, sh_ctx: &'input mut ShellContext) -> ShResult<()> {
-        let context = self.define_context(sh_ctx)?;
-        for command in &self.commands {
-            context.shell_ctx.last_exit = Some(command.execute(&context)?);
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Value<'input> {
-    #[serde(borrow)]
-    String(StringValue<'input>),
+    String(&'input str),
     Int(i64),
 }
 
 impl<'input> Value<'input> {
-    pub fn stringy(&self, context: &ExecutionContext<'input>) -> Cow<'input, BStr> {
-        match self {
-            Value::String(s) => s.resolve(context),
-            Value::Int(i) => Cow::from(BString::from(i.to_string().into_bytes())),
-        }
-    }
-
     pub fn ty(&self) -> Type {
         match self {
             Value::String(_) => Type::String,
@@ -395,58 +166,47 @@ impl<'input> Value<'input> {
                 Type::String => true,
                 _ => false,
             },
+            Type::Bytes => todo!(),
         }
     }
 }
 
-pub struct ExecutionContext<'input> {
-    variables: HashMap<&'input str, Value<'input>>,
-    shell_ctx: &'input mut ShellContext,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum Expression<'input> {
+    #[serde(borrow)]
+    Value(Value<'input>),
+    Call {
+        function: Box<Expression<'input>>,
+        args: Vec<Expression<'input>>,
+    },
+    Interpolated(Vec<StringPart<'input>>),
+    SubShell(Box<CommandContext<'input>>),
 }
 
-impl<'input> ExecutionContext<'input> {
-    fn resolve(&self, name: &'input str) -> Option<Cow<'_, Value<'input>>> {
-        match name {
-            "exit" => self
-                .shell_ctx
-                .last_exit
-                .map(|v| v.code())
-                .flatten()
-                .map(|v| Cow::Owned(Value::Int(v as i64))),
-            _ => self
-                .variables
-                .get(name)
-                .map(|var| Cow::Borrowed(var))
-                .or_else(|| {
-                    std::env::var_os(name).map(|v| {
-                        Cow::Owned(Value::String(StringValue::Env(
-                            Vec::from_os_string(v)
-                                .map(|v| BString::from(v))
-                                .unwrap_or_else(|_| {
-                                    eprintln!("Warning: could not read env var {}", name);
-                                    BString::from(Vec::new())
-                                }),
-                        )))
-                    })
-                }),
+impl<'input> Expression<'input> {
+    pub fn ty(&self) -> Type {
+        match self {
+            Expression::Value(v) => v.ty(),
+            Expression::Call { .. } => todo!(),
+            Expression::Interpolated(_) => todo!(),
+            Expression::SubShell(_) => todo!(),
         }
     }
 
-    fn resolve_text(&self, name: &'input str) -> Cow<'input, BStr> {
-        self.resolve(name)
-            .map(|val| val.stringy(self))
-            .unwrap_or_else(|| {
-                if name != "exit" {
-                    eprintln!("Warning: {} was not defined", name);
-                }
-                Cow::Borrowed(b"".as_bstr())
-            })
+    fn typechecks(&self, ty: Type) -> bool {
+        match self {
+            Expression::Value(v) => v.typechecks(ty),
+            Expression::Call { .. } => todo!(),
+            Expression::Interpolated(_) => todo!(),
+            Expression::SubShell(_) => todo!(),
+        }
     }
 }
 
 pub struct ShellContext {
     current_process: Arc<RwLock<Option<SharedChild>>>,
     last_exit: Option<ExitStatus>,
+    rodeo: Rodeo,
 }
 
 impl ShellContext {
@@ -454,6 +214,7 @@ impl ShellContext {
         ShellContext {
             current_process: Arc::new(RwLock::new(None)),
             last_exit: None,
+            rodeo: Rodeo::new(),
         }
     }
 }
@@ -493,16 +254,16 @@ fn interactive_loop<E: rustyline::Helper>(
     prompt_command: Option<&str>,
 ) -> color_eyre::Result<i32> {
     let command_parser = rsh::CommandParser::new();
+
     loop {
+        let mut rt_ctx = runtime::RuntimeCtx::new(sh_ctx);
+
         let prompt = prompt_command
             .map(|command| -> color_eyre::Result<_> {
                 let parsed = command_parser
-                    .parse(command, lexer::lexer(command))
+                    .parse(rt_ctx.shell_ctx, command, lexer::lexer(command))
                     .map_err(|err| color_eyre::eyre::eyre!("could not parse prompt: {}", err))?;
-                let mut cmd = parsed.prepare(&ExecutionContext {
-                    variables: HashMap::new(),
-                    shell_ctx: sh_ctx,
-                })?;
+                let mut cmd = rt_ctx.prepare_cmd(&parsed)?;
                 cmd.output()
                     .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
                     .map_err(Into::into)
@@ -512,21 +273,24 @@ fn interactive_loop<E: rustyline::Helper>(
         let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
-                let parsed =
-                    match rsh::CommandContextParser::new().parse(&line, lexer::lexer(&line)) {
-                        Err(e) => {
-                            println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
-                            continue;
-                        }
-                        Ok(v) => v,
-                    };
-                match parsed.execute(sh_ctx) {
-                    Err(Error::Exited(v)) => return Ok(v),
-                    Err(e) => println!("  Execution Error: {}", yansi::Paint::red(e)),
+                let parsed = match rsh::CommandContextParser::new().parse(
+                    rt_ctx.shell_ctx,
+                    &line,
+                    lexer::lexer(&line),
+                ) {
+                    Err(e) => {
+                        println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
+                        continue;
+                    }
+                    Ok(v) => v,
+                };
+                match rt_ctx.run_cmd_ctx(parsed) {
+                    Err(RuntimeError::Exit(v)) => return Ok(v),
+                    Err(e) => println!("  Runtime Error: {}", yansi::Paint::red(e)),
                     Ok(_) => (),
                 }
             }
-            Err(ReadlineError::Interrupted) => println!("Interrupted"),
+            Err(ReadlineError::Interrupted) => (),
             Err(ReadlineError::Eof) => return Ok(0),
             Err(err) => Err(err)?,
         }
@@ -544,22 +308,23 @@ impl Builtin {
         match self {
             Builtin::Ast { code } => {
                 let parsed = rsh::CommandContextParser::new()
-                    .parse(code, lexer::lexer(code))
+                    .parse(shell_ctx, code, lexer::lexer(code))
                     .map_err(|err| Error::Parse(err.to_string()))?;
                 println!("{}", ron::to_string(&parsed)?);
             }
             Builtin::RunAst { ast } => {
                 let ast: CommandContext<'_> = ron::from_str(ast)?;
-                ast.execute(shell_ctx)?;
+                let mut rt_ctx = RuntimeCtx::new(shell_ctx);
+                rt_ctx.run_cmd_ctx(ast)?;
             }
         }
 
         Ok(())
     }
 
-    pub fn is(name: &[u8]) -> bool {
+    pub fn is(name: &str) -> bool {
         match name {
-            b"ast" | b"run-ast" => true,
+            "ast" | "run-ast" => true,
             _ => false,
         }
     }
@@ -605,16 +370,20 @@ fn main() -> color_eyre::Result<()> {
         }
     } else if let Some(command) = &args.command {
         let command_parser = rsh::CommandContextParser::new();
-        dbg!(report!(
-            command_parser.parse(&command, lexer::lexer(&command))
-        ));
+        dbg!(report!(command_parser.parse(
+            &mut shell_ctx,
+            &command,
+            lexer::lexer(&command)
+        )));
     } else if let Some(script) = args.file {
         let script = std::fs::read_to_string(script)?;
-        let parsed = report!(rsh::ScriptParser::new().parse(&script, lexer::lexer(&script)));
+        let parsed =
+            report!(rsh::ScriptParser::new().parse(&mut shell_ctx, &script, lexer::lexer(&script)));
+        let mut rt_ctx = RuntimeCtx::new(&mut shell_ctx);
         for command in parsed {
-            match command.execute(&mut shell_ctx) {
+            match rt_ctx.run_cmd_ctx(command) {
                 Ok(_) => (),
-                Err(Error::Exited(i)) => process::exit(i),
+                Err(RuntimeError::Exit(i)) => process::exit(i),
                 Err(e) => {
                     eprintln!("Error executing script: {}", e);
                     process::exit(1);

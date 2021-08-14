@@ -18,6 +18,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f26201604c87b1e01bd3d98f8d5d9a8fcbb815e8cedb41ffccbeb4bf593a35fe"
 
 [[package]]
+name = "ahash"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43bb833f0bf979d8475d38fbf09ed3b8a55e1885fe93ad3f93239fc6a4f17b98"
+dependencies = [
+ "getrandom",
+ "once_cell",
+ "version_check",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -333,6 +344,10 @@ name = "hashbrown"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
+dependencies = [
+ "ahash",
+ "serde",
+]
 
 [[package]]
 name = "heck"
@@ -407,6 +422,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3e58cce361efcc90ba8a0a5f982c741ff86b603495bb15a998412e957dcd278"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "lasso"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8647c8a01e5f7878eacb2c323c4c949fdb63773110f0686c7810769874b7e0a"
+dependencies = [
+ "hashbrown",
+ "serde",
 ]
 
 [[package]]
@@ -702,6 +727,7 @@ dependencies = [
  "itertools",
  "lalrpop",
  "lalrpop-util",
+ "lasso",
  "logos",
  "once_cell",
  "regex",

@@ -1,18 +1,20 @@
-grammar<'input>(input: &'input str);
+grammar<'input>(ctx: &mut ShellContext, input: &'input str);
 use crate::{
 	lexer::{self, LexerError},
 	Command,
 	CommandChain,
 	Pipeline,
 	ChainPart,
-	StringValue,
 	VariableDefinition,
 	CommandContext,
 	StringPart,
 	RedirectionType,
 	Type,
 	Value,
+	Expression,
+	ShellContext,
 };
+use lasso::Spur;
 
 extern {
 	type Location = usize;
@@ -46,14 +48,41 @@ extern {
 	}
 }
 
-pub Command: Command<'input> = {
-	<name:StringValue> <args:(<Value>)*> <redirections:(<Redirection>)*> => Command{<>},
+Value: Value<'input> = {
+	str => Value::String(<>),
+	int => Value::Int(<>),
 };
 
-Redirection: (RedirectionType, Value<'input>) = {
-	">" <v:Value> => (RedirectionType::Out, v),
-	"<" <v:Value> => (RedirectionType::In, v),
-	">>" <v:Value> => (RedirectionType::Append, v),
+Word: &'input str = {
+	word => <>,
+	id => <>,
+};
+
+Expression: Expression<'input> = {
+	Value => Expression::Value(<>),
+	<fun:Expression> "(" <mut exps:(<Expression> ",")*> <tl:Expression?> ")" => Expression::Call {
+		function: Box::new(fun),
+		args: match tl {
+			Some(t) => {
+				exps.push(t);
+				exps
+			},
+			None => exps,
+		}
+	},
+	Word => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
+	istr => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
+	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
+};
+
+Redirection: (RedirectionType, Expression<'input>) = {
+	">" <v:Expression> => (RedirectionType::Out, v),
+	"<" <v:Expression> => (RedirectionType::In, v),
+	">>" <v:Expression> => (RedirectionType::Append, v),
+};
+
+pub Command: Command<'input> = {
+	<name:Expression> <args:(<Expression>)*> <redirections:(<Redirection>)*> => Command{<>},
 };
 
 Pipeline: Pipeline<'input> = {
@@ -74,16 +103,6 @@ pub CommandChain: CommandChain<'input> = {
 	<c:Pipeline> => CommandChain::Pipeline(c),
 };
 
-Type: Type = {
-	"int" => Type::Int,
-	"any" => Type::Dynamic,
-	"str" => Type::String,
-}
-
-VariableDefinition: VariableDefinition<'input> = {
-	<name:Identifier> <ty:(":" <Type>)?> "=" <value:Value> => VariableDefinition{name, value, ty: ty.unwrap_or(Type::Dynamic)}
-};
-
 pub CommandList: Vec<CommandChain<'input>> = {
 	<mut chains:(<CommandChain> ";")*> <trailing:CommandChain> => {
 		chains.push(trailing);
@@ -91,8 +110,18 @@ pub CommandList: Vec<CommandChain<'input>> = {
 	}
 };
 
-Identifier: &'input str = {
-	id => <>,
+Type: Type = {
+	"int" => Type::Int,
+	"any" => Type::Dynamic,
+	"str" => Type::String,
+};
+
+Identifier: Spur = {
+	id => ctx.rodeo.get_or_intern(<>),
+};
+
+VariableDefinition: VariableDefinition<'input> = {
+	<name:Identifier> <ty:(":" <Type>)?> "=" <expr:Expression> => VariableDefinition{name, expr, ty: ty.unwrap_or(Type::Dynamic)}
 };
 
 pub CommandContext: CommandContext<'input> = {
@@ -108,30 +137,10 @@ pub CommandContext: CommandContext<'input> = {
 	<commands:CommandList> => CommandContext{commands, variables: Vec::new()},
 };
 
+
 pub Script: Vec<CommandContext<'input>> = {
 	<mut cmds:(<CommandContext> "\n")*> <trl:CommandContext> <_last_newline:"\n"?> => {
 		cmds.push(trl);
 		cmds
 	}
-}
-
-Word: &'input str = {
-	word => <>,
-	id => <>,
-}
-
-StringValue: StringValue<'input> = {
-	"$(" <cmd:CommandContext> ")" => StringValue::SubShell(Box::new(cmd)),
-	str => StringValue::Litteral(<>),
-	Word => StringValue::Interpolated(StringPart::interpolate(<>)),
-	istr => StringValue::Interpolated(StringPart::interpolate(<>)),
-};
-
-IntValue: i64 = {
-	int => <>,
-};
-
-Value: Value<'input> = {
-	StringValue => Value::String(<>),
-	IntValue => Value::Int(<>),
 };
