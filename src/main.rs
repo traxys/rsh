@@ -19,7 +19,6 @@ use structopt::StructOpt;
 pub mod lexer;
 
 lalrpop_mod!(pub rsh);
-lalrpop_mod!(pub fstring);
 
 type ShResult<T, E = Error> = std::result::Result<T, E>;
 

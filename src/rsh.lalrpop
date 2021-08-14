@@ -109,7 +109,7 @@ pub CommandContext: CommandContext<'input> = {
 };
 
 pub Script: Vec<CommandContext<'input>> = {
-	<mut cmds:(<CommandContext> "\n")*> <trl:CommandContext> => {
+	<mut cmds:(<CommandContext> "\n")*> <trl:CommandContext> <_last_newline:"\n"?> => {
 		cmds.push(trl);
 		cmds
 	}
