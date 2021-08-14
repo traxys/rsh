@@ -9,18 +9,20 @@ use crate::{
 	CommandContext,
 	StringPart,
 	RedirectionType,
+	Type,
+	Value,
 };
 use lalrpop_util::ParseError;
 use regex::Regex;
 
 pub Command: Command<'input> = {
-	<name:StringValue> <args:(<StringValue>)*> <redirections:(<Redirection>)*> => Command{<>},
+	<name:StringValue> <args:(<Value>)*> <redirections:(<Redirection>)*> => Command{<>},
 };
 
-Redirection: (RedirectionType, StringValue<'input>) = {
-	">" <v:StringValue> => (RedirectionType::Out, v),
-	"<" <v:StringValue> => (RedirectionType::In, v),
-	">>" <v:StringValue> => (RedirectionType::Append, v),
+Redirection: (RedirectionType, Value<'input>) = {
+	">" <v:Value> => (RedirectionType::Out, v),
+	"<" <v:Value> => (RedirectionType::In, v),
+	">>" <v:Value> => (RedirectionType::Append, v),
 };
 
 Pipeline: Pipeline<'input> = {
@@ -41,8 +43,14 @@ pub CommandChain: CommandChain<'input> = {
 	<c:Pipeline> => CommandChain::Pipeline(c),
 };
 
+Type: Type = {
+	"int" => Type::Int,
+	"any" => Type::Dynamic,
+	"str" => Type::String,
+}
+
 VariableDefinition: VariableDefinition<'input> = {
-	<name:Identifier> "=" <value:StringValue> => VariableDefinition{<>}
+	<name:Identifier> <ty:(":" <Type>)?> "=" <value:Value> => VariableDefinition{name, value, ty: ty.unwrap_or(Type::Dynamic)}
 };
 
 pub CommandList: Vec<CommandChain<'input>> = {
@@ -80,9 +88,24 @@ StringValue: StringValue<'input> = {
 	<s:r#""(\\[^\n]|[^"\n])*""#> => StringValue::Interpolated(StringPart::interpolate(&s[1..(s.len()-1)])),
 };
 
+IntValue: i64 = {
+	r"[0-9_]+" => <>.bytes().filter(|&b| b != b'_').fold(0, |current, digit| 10*current + (digit - b'0') as i64),
+};
+
+Value: Value<'input> = {
+	StringValue => Value::String(<>),
+	IntValue => Value::Int(<>),
+};
+
 match {
 	"let",
 	"in",
+	":",
+	"str",
+	"int",
+	"any",
+} else {
+	r"[0-9_]+",
 } else {
 	r"[\w\d:+\-_/.,$]+",
 } else {

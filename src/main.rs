@@ -30,6 +30,8 @@ pub enum Error {
     Exited(i32),
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("type error: expected {expected} got {got}")]
+    TypeError { expected: Type, got: Type },
 }
 
 static VARIABLE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+").unwrap());
@@ -85,7 +87,7 @@ impl<'input> StringPart<'input> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StringValue<'input> {
     Litteral(&'input str),
-    Variable(&'input str),
+    // Variable(&'input str),
     Interpolated(Vec<StringPart<'input>>),
     SubShell(Box<CommandContext<'input>>),
     Env(BString),
@@ -95,7 +97,7 @@ impl<'input> StringValue<'input> {
     pub fn resolve(&self, context: &ExecutionContext<'input>) -> Cow<'input, BStr> {
         match self {
             Self::Litteral(l) => Cow::from(l.as_bytes().as_bstr()),
-            Self::Variable(name) => context.resolve_text(name),
+            // Self::Variable(name) => context.resolve_text(name),
             Self::SubShell(s) => sub_shell_exec(s, context)
                 .map(Cow::from)
                 .map_err(|e| {
@@ -135,9 +137,9 @@ pub struct Command<'input> {
     #[serde(borrow)]
     name: StringValue<'input>,
     #[serde(borrow)]
-    args: Vec<StringValue<'input>>,
+    args: Vec<Value<'input>>,
     #[serde(borrow)]
-    redirections: Vec<(RedirectionType, StringValue<'input>)>,
+    redirections: Vec<(RedirectionType, Value<'input>)>,
 }
 
 impl<'input> Command<'input> {
@@ -150,7 +152,7 @@ impl<'input> Command<'input> {
             match self
                 .args
                 .first()
-                .map(|v| v.resolve(context).to_str().map(|s| s.parse()))
+                .map(|v| v.stringy(context).to_str().map(|s| s.parse()))
             {
                 Some(Ok(Ok(v))) => return Err(Error::Exited(v)),
                 _ => return Err(Error::Exited(255)),
@@ -164,10 +166,10 @@ impl<'input> Command<'input> {
         } else {
             command = process::Command::new(name.to_os_str_lossy());
         }
-        let args: Vec<_> = self.args.iter().map(|v| v.resolve(context)).collect();
+        let args: Vec<_> = self.args.iter().map(|v| v.stringy(context)).collect();
         command.args(args.iter().map(|v| v.to_os_str_lossy()));
         for (ty, path) in &self.redirections {
-            let path = path.resolve(context);
+            let path = path.stringy(context);
             let path = path.to_path_lossy();
             match ty {
                 RedirectionType::In => {
@@ -293,10 +295,28 @@ impl<'input> CommandChain<'input> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum Type {
+    Dynamic,
+    Int,
+    String,
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Dynamic => write!(f, "any"),
+            Type::Int => write!(f, "int"),
+            Type::String => write!(f, "str"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VariableDefinition<'input> {
     name: &'input str,
-    value: StringValue<'input>,
+    value: Value<'input>,
+    ty: Type,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -308,19 +328,31 @@ pub struct CommandContext<'input> {
 }
 
 impl<'input> CommandContext<'input> {
-    fn define_context(&self, shell_ctx: &'input mut ShellContext) -> ExecutionContext<'input> {
-        ExecutionContext {
+    fn define_context(
+        &self,
+        shell_ctx: &'input mut ShellContext,
+    ) -> ShResult<ExecutionContext<'input>> {
+        Ok(ExecutionContext {
             variables: self
                 .variables
                 .iter()
-                .map(|def| (def.name, Value::String(def.value.clone())))
-                .collect(),
+                .map(|def| {
+                    if !def.value.typechecks(def.ty) {
+                        Err(Error::TypeError {
+                            expected: def.ty,
+                            got: def.value.ty(),
+                        })
+                    } else {
+                        Ok((def.name, def.value.clone()))
+                    }
+                })
+                .collect::<ShResult<_>>()?,
             shell_ctx,
-        }
+        })
     }
 
     fn execute(&self, sh_ctx: &'input mut ShellContext) -> ShResult<()> {
-        let context = self.define_context(sh_ctx);
+        let context = self.define_context(sh_ctx)?;
         for command in &self.commands {
             context.shell_ctx.last_exit = Some(command.execute(&context)?);
         }
@@ -328,8 +360,9 @@ impl<'input> CommandContext<'input> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum Value<'input> {
+    #[serde(borrow)]
     String(StringValue<'input>),
     Int(i64),
 }
@@ -339,6 +372,27 @@ impl<'input> Value<'input> {
         match self {
             Value::String(s) => s.resolve(context),
             Value::Int(i) => Cow::from(BString::from(i.to_string().into_bytes())),
+        }
+    }
+
+    pub fn ty(&self) -> Type {
+        match self {
+            Value::String(_) => Type::String,
+            Value::Int(_) => Type::Int,
+        }
+    }
+
+    fn typechecks(&self, ty: Type) -> bool {
+        match ty {
+            Type::Dynamic => true,
+            Type::Int => match self.ty() {
+                Type::Int => true,
+                _ => false,
+            },
+            Type::String => match self.ty() {
+                Type::String => true,
+                _ => false,
+            },
         }
     }
 }
