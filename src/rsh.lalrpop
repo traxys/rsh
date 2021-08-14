@@ -8,12 +8,19 @@ use crate::{
 	VariableDefinition,
 	CommandContext,
 	StringPart,
+	RedirectionType,
 };
 use lalrpop_util::ParseError;
 use regex::Regex;
 
 pub Command: Command<'input> = {
-	<name:StringValue> <args:(<StringValue>)*>  => Command{<>},
+	<name:StringValue> <args:(<StringValue>)*> <redirections:(<Redirection>)*> => Command{<>},
+};
+
+Redirection: (RedirectionType, StringValue<'input>) = {
+	">" <v:StringValue> => (RedirectionType::Out, v),
+	"<" <v:StringValue> => (RedirectionType::In, v),
+	">>" <v:StringValue> => (RedirectionType::Append, v),
 };
 
 Pipeline: Pipeline<'input> = {

@@ -9,6 +9,7 @@ use shared_child::SharedChild;
 use std::{
     borrow::Cow,
     collections::HashMap,
+    fs::{File, OpenOptions},
     process::{self, ExitStatus, Stdio},
     sync::{Arc, RwLock},
 };
@@ -122,12 +123,21 @@ fn sub_shell_exec<'input>(
     ))
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum RedirectionType {
+    In,
+    Out,
+    Append,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Command<'input> {
     #[serde(borrow)]
     name: StringValue<'input>,
     #[serde(borrow)]
     args: Vec<StringValue<'input>>,
+    #[serde(borrow)]
+    redirections: Vec<(RedirectionType, StringValue<'input>)>,
 }
 
 impl<'input> Command<'input> {
@@ -156,6 +166,24 @@ impl<'input> Command<'input> {
         }
         let args: Vec<_> = self.args.iter().map(|v| v.resolve(context)).collect();
         command.args(args.iter().map(|v| v.to_os_str_lossy()));
+        for (ty, path) in &self.redirections {
+            let path = path.resolve(context);
+            let path = path.to_path_lossy();
+            match ty {
+                RedirectionType::In => {
+                    let file = File::open(path)?;
+                    command.stdin(file);
+                }
+                RedirectionType::Out => {
+                    let file = OpenOptions::new().create(true).write(true).open(path)?;
+                    command.stdout(file);
+                }
+                RedirectionType::Append => {
+                    let file = OpenOptions::new().create(true).append(true).open(path)?;
+                    command.stdout(file);
+                }
+            }
+        }
         Ok(command)
     }
 }
