@@ -10,10 +10,13 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     fs::{File, OpenOptions},
+    path::PathBuf,
     process::{self, ExitStatus, Stdio},
     sync::{Arc, RwLock},
 };
 use structopt::StructOpt;
+
+pub mod lexer;
 
 lalrpop_mod!(pub rsh);
 lalrpop_mod!(pub fstring);
@@ -495,7 +498,7 @@ fn interactive_loop<E: rustyline::Helper>(
         let prompt = prompt_command
             .map(|command| -> color_eyre::Result<_> {
                 let parsed = command_parser
-                    .parse(command)
+                    .parse(command, lexer::lexer(command))
                     .map_err(|err| color_eyre::eyre::eyre!("could not parse prompt: {}", err))?;
                 let mut cmd = parsed.prepare(&ExecutionContext {
                     variables: HashMap::new(),
@@ -510,13 +513,14 @@ fn interactive_loop<E: rustyline::Helper>(
         let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
-                let parsed = match rsh::CommandContextParser::new().parse(&line) {
-                    Err(e) => {
-                        println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
-                        continue;
-                    }
-                    Ok(v) => v,
-                };
+                let parsed =
+                    match rsh::CommandContextParser::new().parse(&line, lexer::lexer(&line)) {
+                        Err(e) => {
+                            println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
+                            continue;
+                        }
+                        Ok(v) => v,
+                    };
                 match parsed.execute(sh_ctx) {
                     Err(Error::Exited(v)) => return Ok(v),
                     Err(e) => println!("  Execution Error: {}", yansi::Paint::red(e)),
@@ -531,21 +535,6 @@ fn interactive_loop<E: rustyline::Helper>(
 }
 
 #[derive(StructOpt)]
-struct Args {
-    #[structopt(short, long)]
-    command: Option<String>,
-    #[structopt(subcommand)]
-    sub_command: Option<SubCommands>,
-    #[structopt(short, long)]
-    prompt_command: Option<String>,
-}
-
-#[derive(StructOpt)]
-enum SubCommands {
-    Builtin(Builtin),
-}
-
-#[derive(StructOpt)]
 enum Builtin {
     Ast { code: String },
     RunAst { ast: String },
@@ -556,7 +545,7 @@ impl Builtin {
         match self {
             Builtin::Ast { code } => {
                 let parsed = rsh::CommandContextParser::new()
-                    .parse(code)
+                    .parse(code, lexer::lexer(code))
                     .map_err(|err| Error::Parse(err.to_string()))?;
                 println!("{}", ron::to_string(&parsed)?);
             }
@@ -575,6 +564,22 @@ impl Builtin {
             _ => false,
         }
     }
+}
+
+#[derive(StructOpt)]
+struct Args {
+    #[structopt(short, long)]
+    command: Option<String>,
+    #[structopt(subcommand)]
+    sub_command: Option<SubCommands>,
+    #[structopt(short, long)]
+    prompt_command: Option<String>,
+    file: Option<PathBuf>,
+}
+
+#[derive(StructOpt)]
+enum SubCommands {
+    Builtin(Builtin),
 }
 
 fn main() -> color_eyre::Result<()> {
@@ -601,7 +606,24 @@ fn main() -> color_eyre::Result<()> {
         }
     } else if let Some(command) = &args.command {
         let command_parser = rsh::CommandContextParser::new();
-        dbg!(report!(command_parser.parse(&command)));
+        dbg!(report!(
+            command_parser.parse(&command, lexer::lexer(&command))
+        ));
+    } else if let Some(script) = args.file {
+        let script = std::fs::read_to_string(script)?;
+        let parsed = report!(rsh::ScriptParser::new().parse(&script, lexer::lexer(&script)));
+        for command in parsed {
+            match command.execute(&mut shell_ctx) {
+                Ok(_) => (),
+                Err(Error::Exited(i)) => process::exit(i),
+                Err(e) => {
+                    eprintln!("Error executing script: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+
+        process::exit(0)
     } else {
         let exit = interactive_input(&mut shell_ctx, args.prompt_command.as_deref())?;
         process::exit(exit);
