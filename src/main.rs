@@ -18,6 +18,7 @@ use crate::runtime::RuntimeError;
 
 pub mod lexer;
 pub mod runtime;
+pub mod type_checker;
 
 lalrpop_mod!(pub rsh);
 
@@ -114,6 +115,24 @@ pub enum Type {
     Bytes,
 }
 
+enum TypeCheck {
+    Compatible,
+    Incompatible,
+    Runtime,
+}
+
+impl Type {
+    fn is_compatible(&self, expr_ty: Type) -> TypeCheck {
+        match (self, expr_ty) {
+            (Self::Dynamic, _) => TypeCheck::Compatible,
+            (_, Self::Dynamic) => TypeCheck::Runtime,
+            (Self::Int, Self::Int) => TypeCheck::Compatible,
+            (Self::String | Self::Bytes, Self::String | Self::Bytes) => TypeCheck::Compatible,
+            _ => TypeCheck::Incompatible,
+        }
+    }
+}
+
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -154,21 +173,6 @@ impl<'input> Value<'input> {
             Value::Int(_) => Type::Int,
         }
     }
-
-    fn typechecks(&self, ty: Type) -> bool {
-        match ty {
-            Type::Dynamic => true,
-            Type::Int => match self.ty() {
-                Type::Int => true,
-                _ => false,
-            },
-            Type::String => match self.ty() {
-                Type::String => true,
-                _ => false,
-            },
-            Type::Bytes => todo!(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,26 +185,7 @@ enum Expression<'input> {
     },
     Interpolated(Vec<StringPart<'input>>),
     SubShell(Box<CommandContext<'input>>),
-}
-
-impl<'input> Expression<'input> {
-    pub fn ty(&self) -> Type {
-        match self {
-            Expression::Value(v) => v.ty(),
-            Expression::Call { .. } => todo!(),
-            Expression::Interpolated(_) => todo!(),
-            Expression::SubShell(_) => todo!(),
-        }
-    }
-
-    fn typechecks(&self, ty: Type) -> bool {
-        match self {
-            Expression::Value(v) => v.typechecks(ty),
-            Expression::Call { .. } => todo!(),
-            Expression::Interpolated(_) => todo!(),
-            Expression::SubShell(_) => todo!(),
-        }
-    }
+    Variable(Spur),
 }
 
 pub struct ShellContext {

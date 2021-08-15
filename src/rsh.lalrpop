@@ -75,6 +75,23 @@ Expression: Expression<'input> = {
 	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
 };
 
+StrongExpression: Expression<'input> = {
+	istr => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
+	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
+	Value => Expression::Value(<>),
+	<fun:Expression> "(" <mut exps:(<Expression> ",")*> <tl:Expression?> ")" => Expression::Call {
+		function: Box::new(fun),
+		args: match tl {
+			Some(t) => {
+				exps.push(t);
+				exps
+			},
+			None => exps,
+		}
+	},
+	<id:Identifier> => Expression::Variable(id),
+}
+
 Redirection: (RedirectionType, Expression<'input>) = {
 	">" <v:Expression> => (RedirectionType::Out, v),
 	"<" <v:Expression> => (RedirectionType::In, v),
@@ -121,7 +138,7 @@ Identifier: Spur = {
 };
 
 VariableDefinition: VariableDefinition<'input> = {
-	<name:Identifier> <ty:(":" <Type>)?> "=" <expr:Expression> => VariableDefinition{name, expr, ty: ty.unwrap_or(Type::Dynamic)}
+	<name:Identifier> <ty:(":" <Type>)?> "=" <expr:StrongExpression> => VariableDefinition{name, expr, ty: ty.unwrap_or(Type::Dynamic)}
 };
 
 pub CommandContext: CommandContext<'input> = {

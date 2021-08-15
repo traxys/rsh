@@ -1,4 +1,7 @@
-use crate::{Builtin, RedirectionType, ShellContext, Type};
+use crate::{
+    type_checker::{TypeCheckerCtx, TypeError},
+    Builtin, RedirectionType, ShellContext,
+};
 use lasso::Spur;
 use shared_child::SharedChild;
 use std::{
@@ -21,6 +24,10 @@ pub enum RuntimeError {
     SerDe(#[from] ron::Error),
     #[error("cycle in evaluation: {:?}", _0)]
     EvaluationCycle(Vec<String>),
+    #[error("undefined: {}", _0)]
+    Undefined(String),
+    #[error("static errors: {:?}", _0)]
+    Static(Vec<TypeError>),
 }
 
 #[derive(Debug)]
@@ -222,6 +229,10 @@ impl<'input> RuntimeCtx<'input> {
     }
 
     pub fn run_cmd_ctx(&mut self, cmd_ctx: super::CommandContext<'input>) -> RuntimeResult<()> {
+        TypeCheckerCtx::new(self.shell_ctx)
+            .check_cmd_ctx(&cmd_ctx)
+            .map_err(|ty_errs| RuntimeError::Static(ty_errs))?;
+
         self.enter_overlay(cmd_ctx.variables);
 
         for command in &cmd_ctx.commands {
@@ -300,7 +311,7 @@ impl<'input> RuntimeCtx<'input> {
                         .collect(),
                 ));
             };
-            let val = Rc::new(self.eval_expr(&expr)?);
+            let val = self.eval_expr(&expr)?;
             let overlay = &mut self.overlays[idx];
             overlay.currently_evaluating.remove(&name);
             overlay.values.insert(name, val.clone());
@@ -324,22 +335,33 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn eval_expr(&mut self, expr: &super::Expression<'input>) -> RuntimeResult<Value<'input>> {
+    fn eval_expr(&mut self, expr: &super::Expression<'input>) -> RuntimeResult<Rc<Value<'input>>> {
         match expr {
-            super::Expression::SubShell(code) => Ok(Value::Bytes(
+            super::Expression::SubShell(code) => Ok(Rc::new(Value::Bytes(
                 process::Command::new(std::env::current_exe()?)
                     .arg("builtin")
                     .arg("run-ast")
                     .arg(ron::to_string(code)?)
                     .output()?
                     .stdout,
-            )),
+            ))),
             super::Expression::Value(v) => match v {
-                super::Value::String(s) => Ok(Value::Str(Cow::from(*s))),
-                super::Value::Int(i) => Ok(Value::Int(*i)),
+                super::Value::String(s) => Ok(Rc::new(Value::Str(Cow::from(*s)))),
+                super::Value::Int(i) => Ok(Rc::new(Value::Int(*i))),
             },
             super::Expression::Call { .. } => todo!(),
-            super::Expression::Interpolated(i) => self.run_interpolation(i).map(Value::Str),
+            super::Expression::Interpolated(i) => {
+                self.run_interpolation(i).map(Value::Str).map(Rc::new)
+            }
+            super::Expression::Variable(v) => self.resolve(*v)?.map(Ok).unwrap_or_else(|| {
+                Err(RuntimeError::Undefined(
+                    self.shell_ctx
+                        .rodeo
+                        .try_resolve(v)
+                        .unwrap_or("<unkown>")
+                        .to_owned(),
+                ))
+            }),
         }
     }
 }
