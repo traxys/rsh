@@ -79,7 +79,7 @@ StrongExpression: Expression<'input> = {
 	istr => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
 	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
 	Value => Expression::Value(<>),
-	<fun:Expression> "(" <mut exps:(<Expression> ",")*> <tl:Expression?> ")" => Expression::Call {
+	<fun:Call> "(" <mut exps:(<StrongExpression> ",")*> <tl:StrongExpression?> ")" => Expression::Call {
 		function: Box::new(fun),
 		args: match tl {
 			Some(t) => {
@@ -90,6 +90,11 @@ StrongExpression: Expression<'input> = {
 		}
 	},
 	<id:Identifier> => Expression::Variable(id),
+}
+
+Call: Expression<'input> = {
+	<id:Identifier> => Expression::Variable(id),
+	"(" <e:StrongExpression> ")" => e,
 }
 
 Redirection: (RedirectionType, Expression<'input>) = {

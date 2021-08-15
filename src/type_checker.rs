@@ -4,17 +4,26 @@ use std::collections::HashMap;
 
 pub type TypeCheckResult<T = ()> = Result<T, Vec<TypeError>>;
 
-#[derive(Debug, Copy, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum TypeError {
     #[error("type mismatch: expected {} got {}", expected, got)]
     Mismatch { expected: Type, got: Type },
-    #[error("undefined identifier")]
-    Undefined,
+    #[error("type is not callable: {}", _0)]
+    NotCallable(Type),
+    #[error("undefined identifier: {}", _0)]
+    Undefined(String),
 }
 
 fn root_types(shell_ctx: &mut ShellContext) -> HashMap<Spur, Type> {
     let mut tys = HashMap::new();
     tys.insert(shell_ctx.rodeo.get_or_intern_static("exit"), Type::Int);
+    tys.insert(
+        shell_ctx.rodeo.get_or_intern_static("s"),
+        Type::Function {
+            ret: Box::new(Type::String),
+            args: vec![Type::Dynamic],
+        },
+    );
     tys
 }
 
@@ -86,7 +95,10 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
 
     fn enter_overlay(&mut self, definitions: &[VariableDefinition<'_>]) {
         self.overlays.push(Overlay {
-            types: definitions.iter().map(|def| (def.name, def.ty)).collect(),
+            types: definitions
+                .iter()
+                .map(|def| (def.name, def.ty.clone()))
+                .collect(),
         })
     }
 
@@ -109,10 +121,10 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
 
     fn check_definition(&mut self, def: &VariableDefinition) -> TypeCheckResult {
         let ty = self.check_expression(&def.expr)?;
-        match def.ty.is_compatible(ty) {
+        match def.ty.is_compatible(&ty) {
             TypeCheck::Compatible | TypeCheck::Runtime => Ok(()),
             TypeCheck::Incompatible => Err(vec![TypeError::Mismatch {
-                expected: def.ty,
+                expected: def.ty.clone(),
                 got: ty,
             }]),
         }
@@ -156,11 +168,27 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         match expr {
             crate::Expression::Value(v) => Ok(v.ty()),
             crate::Expression::Call { function, args } => {
-                let (_func_ty, _args_ty) = merge_errors(
+                let (func_ty, args_ty) = merge_errors(
                     self.check_expression(function),
                     fold_errors(args.iter(), |expr| self.check_expression(expr)),
                 )?;
-                todo!("func type")
+                let ret_ty = match func_ty {
+                    Type::Function { ret, args } => {
+                        fold_errors(
+                            args.into_iter().zip(args_ty),
+                            |(expected, got)| match expected.is_compatible(&got) {
+                                TypeCheck::Compatible | TypeCheck::Runtime => Ok(()),
+                                TypeCheck::Incompatible => {
+                                    Err(vec![TypeError::Mismatch { expected, got }])
+                                }
+                            },
+                        )?;
+                        ret
+                    }
+                    inv_ty => return Err(vec![TypeError::NotCallable(inv_ty)]),
+                };
+
+                Ok(*ret_ty)
             }
             crate::Expression::Interpolated(i) => {
                 self.check_interpolated(i)?;
@@ -170,10 +198,17 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                 self.check_cmd_ctx(subshell)?;
                 Ok(Type::Bytes)
             }
-            crate::Expression::Variable(v) => self
-                .resolve(*v)
-                .map(Ok)
-                .unwrap_or_else(|| Err(vec![TypeError::Undefined])),
+            crate::Expression::Variable(v) => {
+                self.resolve(*v).cloned().map(Ok).unwrap_or_else(|| {
+                    Err(vec![TypeError::Undefined(
+                        self.shell_ctx
+                            .rodeo
+                            .try_resolve(v)
+                            .unwrap_or("<unknown>")
+                            .to_string(),
+                    )])
+                })
+            }
         }
     }
 
@@ -181,10 +216,10 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         Ok(())
     }
 
-    fn resolve(&self, name: Spur) -> Option<Type> {
+    fn resolve(&self, name: Spur) -> Option<&Type> {
         self.overlays
             .iter()
             .rev()
-            .find_map(|overlay| overlay.types.get(&name).copied())
+            .find_map(|overlay| overlay.types.get(&name))
     }
 }

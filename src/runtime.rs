@@ -1,6 +1,6 @@
 use crate::{
     type_checker::{TypeCheckerCtx, TypeError},
-    Builtin, RedirectionType, ShellContext,
+    Builtin, RedirectionType, ShellContext, Type,
 };
 use lasso::Spur;
 use shared_child::SharedChild;
@@ -28,6 +28,12 @@ pub enum RuntimeError {
     Undefined(String),
     #[error("static errors: {:?}", _0)]
     Static(Vec<TypeError>),
+    #[error("type {} is not callable", _0)]
+    UncallableType(Type),
+    #[error("unexpected type: expected {}, got {}", expected, got)]
+    UnexpctedType { expected: Type, got: Type },
+    #[error("unexpected argument count: expected {}, got {}", expected, got)]
+    InvalidArgCount { expected: usize, got: usize },
 }
 
 #[derive(Debug)]
@@ -35,7 +41,10 @@ enum Value<'input> {
     Str(Cow<'input, str>),
     Int(i64),
     Bytes(Vec<u8>),
+    NativeFn(usize),
 }
+
+const NATIVE_FNS: &[&'static str] = &["s"];
 
 impl<'input> Value<'input> {
     pub fn to_string(&self) -> Cow<'input, str> {
@@ -43,16 +52,18 @@ impl<'input> Value<'input> {
             Value::Str(v) => v.clone(),
             Value::Int(i) => Cow::Owned(i.to_string()),
             Value::Bytes(v) => String::from_utf8_lossy(v).to_string().into(),
+            Value::NativeFn(id) => format!("<native fn {}>", NATIVE_FNS[*id],).into(),
         }
     }
 
-    /* pub fn ty(&self) -> Type {
+    pub fn ty(&self) -> Type {
         match self {
             Value::Str(_) => Type::String,
             Value::Int(_) => Type::Int,
             Value::Bytes(_) => Type::Bytes,
+            Value::NativeFn(_id) => todo!(),
         }
-    } */
+    }
 }
 
 pub struct RuntimeCtx<'input> {
@@ -68,11 +79,26 @@ pub struct Overlay<'input> {
     currently_evaluating: HashSet<Spur>,
 }
 
+fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
+    let mut values = HashMap::new();
+    for (id, name) in NATIVE_FNS.iter().enumerate() {
+        values.insert(
+            sh_ctx.rodeo.get_or_intern_static(name),
+            Rc::new(Value::NativeFn(id)),
+        );
+    }
+    Overlay {
+        definitions: HashMap::new(),
+        values,
+        currently_evaluating: HashSet::new(),
+    }
+}
+
 impl<'input> RuntimeCtx<'input> {
     pub fn new(shell_ctx: &'input mut ShellContext) -> Self {
         Self {
             exit: shell_ctx.rodeo.get_or_intern_static("exit"),
-            overlays: Vec::new(),
+            overlays: vec![root_overlay(shell_ctx)],
             shell_ctx,
         }
     }
@@ -267,15 +293,13 @@ impl<'input> RuntimeCtx<'input> {
     fn resolve_text(&mut self, name: Spur) -> RuntimeResult<Cow<'input, str>> {
         match self.resolve(name)? {
             None => {
-                if name != self.exit {
-                    eprintln!(
-                        "Warning: {} was not defined",
-                        self.shell_ctx
-                            .rodeo
-                            .try_resolve(&name)
-                            .unwrap_or("<unknown>")
-                    );
-                }
+                eprintln!(
+                    "Warning: {} was not defined",
+                    self.shell_ctx
+                        .rodeo
+                        .try_resolve(&name)
+                        .unwrap_or("<unknown>")
+                );
                 Ok(Cow::Borrowed(""))
             }
             Some(v) => Ok(v.to_string()),
@@ -324,14 +348,52 @@ impl<'input> RuntimeCtx<'input> {
 
     fn resolve(&mut self, name: Spur) -> RuntimeResult<Option<Rc<Value<'input>>>> {
         if name == self.exit {
-            Ok(self
-                .shell_ctx
-                .last_exit
-                .map(|v| v.code())
-                .flatten()
-                .map(|v| Rc::new(Value::Int(v as i64))))
+            Ok(Some(Rc::new(Value::Int(
+                self.shell_ctx
+                    .last_exit
+                    .map(|v| v.code())
+                    .flatten()
+                    .unwrap_or(0) as i64,
+            ))))
         } else {
             self.rec_resolve(name)
+        }
+    }
+
+    fn call_native_function(
+        &mut self,
+        id: usize,
+        args: Vec<Rc<Value<'input>>>,
+    ) -> RuntimeResult<Rc<Value<'input>>> {
+        fn check_args<'input>(expected: usize, args: &[Rc<Value<'input>>]) -> RuntimeResult<()> {
+            if args.len() != expected {
+                Err(RuntimeError::InvalidArgCount {
+                    expected,
+                    got: args.len(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        match id {
+            // s
+            0 => {
+                check_args(1, &args)?;
+                Ok(Rc::new(Value::Str(args[0].to_string())))
+            }
+            _ => unreachable!("invalid native function got called ({})", id),
+        }
+    }
+
+    fn call_function(
+        &mut self,
+        function: Rc<Value<'input>>,
+        args: Vec<Rc<Value<'input>>>,
+    ) -> RuntimeResult<Rc<Value<'input>>> {
+        match &*function {
+            Value::NativeFn(id) => self.call_native_function(*id, args),
+            val => return Err(RuntimeError::UncallableType(val.ty())),
         }
     }
 
@@ -349,7 +411,14 @@ impl<'input> RuntimeCtx<'input> {
                 super::Value::String(s) => Ok(Rc::new(Value::Str(Cow::from(*s)))),
                 super::Value::Int(i) => Ok(Rc::new(Value::Int(*i))),
             },
-            super::Expression::Call { .. } => todo!(),
+            super::Expression::Call { function, args } => {
+                let function = self.eval_expr(function)?;
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|arg| self.eval_expr(arg))
+                    .collect::<RuntimeResult<_>>()?;
+                self.call_function(function, args)
+            }
             super::Expression::Interpolated(i) => {
                 self.run_interpolation(i).map(Value::Str).map(Rc::new)
             }

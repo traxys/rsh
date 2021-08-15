@@ -107,12 +107,13 @@ pub enum CommandChain<'input> {
     Pipeline(Pipeline<'input>),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Type {
     Dynamic,
     Int,
     String,
     Bytes,
+    Function { ret: Box<Type>, args: Vec<Type> },
 }
 
 enum TypeCheck {
@@ -122,12 +123,13 @@ enum TypeCheck {
 }
 
 impl Type {
-    fn is_compatible(&self, expr_ty: Type) -> TypeCheck {
+    fn is_compatible(&self, expr_ty: &Type) -> TypeCheck {
         match (self, expr_ty) {
             (Self::Dynamic, _) => TypeCheck::Compatible,
             (_, Self::Dynamic) => TypeCheck::Runtime,
             (Self::Int, Self::Int) => TypeCheck::Compatible,
             (Self::String | Self::Bytes, Self::String | Self::Bytes) => TypeCheck::Compatible,
+            (Self::Function { .. }, Self::Function { .. }) => TypeCheck::Compatible,
             _ => TypeCheck::Incompatible,
         }
     }
@@ -140,6 +142,18 @@ impl std::fmt::Display for Type {
             Type::Int => write!(f, "int"),
             Type::String => write!(f, "str"),
             Type::Bytes => write!(f, "bytes"),
+            Type::Function { ret, args } => {
+                write!(f, "fn(")?;
+                if args.len() > 1 {
+                    for arg in &args[0..args.len() - 2] {
+                        write!(f, "{},", arg)?
+                    }
+                }
+                if let Some(arg) = args.last() {
+                    write!(f, "{}", arg)?
+                }
+                write!(f, ") -> {}", ret)
+            }
         }
     }
 }
