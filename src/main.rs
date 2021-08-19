@@ -209,6 +209,11 @@ enum Expression<'input> {
         function: Box<Expression<'input>>,
         args: Vec<Expression<'input>>,
     },
+    Method {
+        value: Box<Expression<'input>>,
+        name: Spur,
+        args: Vec<Expression<'input>>,
+    },
     Interpolated(Vec<StringPart<'input>>),
     SubShell(Box<CommandContext<'input>>),
     Variable(Spur),

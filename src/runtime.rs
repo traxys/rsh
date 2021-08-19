@@ -484,6 +484,22 @@ impl<'input> RuntimeCtx<'input> {
                     .collect::<RuntimeResult<_>>()?;
                 self.call_function(function, args)
             }
+            super::Expression::Method { value, name, args } => {
+                let args = std::iter::once(&**value)
+                    .chain(args.iter())
+                    .map(|arg| self.eval_expr(arg))
+                    .collect::<RuntimeResult<_>>()?;
+                match self.resolve(*name)? {
+                    None => Err(RuntimeError::Undefined(
+                        self.shell_ctx
+                            .rodeo
+                            .try_resolve(name)
+                            .unwrap_or("<unkown>")
+                            .to_owned(),
+                    )),
+                    Some(function) => self.call_function(function, args),
+                }
+            }
             super::Expression::Interpolated(i) => self.run_interpolation(i).map(Value::Str),
             super::Expression::Variable(v) => self.resolve(*v)?.map(Ok).unwrap_or_else(|| {
                 Err(RuntimeError::Undefined(

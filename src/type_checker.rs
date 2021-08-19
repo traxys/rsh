@@ -163,6 +163,44 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
     fn check_expression(&mut self, expr: &super::Expression) -> TypeCheckResult<Type> {
         match expr {
             crate::Expression::Value(v) => Ok(v.ty()),
+            crate::Expression::Method { value, name, args } => {
+                let (value_ty, args_ty) = merge_errors(
+                    self.check_expression(value),
+                    fold_errors(args.iter(), |expr| self.check_expression(expr)),
+                )?;
+                let func_ty = match self.resolve(*name) {
+                    Some(ty) => ty,
+                    None => {
+                        return Err(vec![TypeError::Undefined(
+                            self.shell_ctx
+                                .rodeo
+                                .try_resolve(name)
+                                .unwrap_or("<unknown>")
+                                .to_string(),
+                        )])
+                    }
+                };
+
+                let ret_ty = match func_ty {
+                    Type::Function { ret, args } => {
+                        fold_errors(
+                            args.into_iter()
+                                .zip(std::iter::once(value_ty).chain(args_ty)),
+                            |(expected, got)| match expected.is_compatible(&got) {
+                                TypeCheck::Compatible | TypeCheck::Runtime => Ok(()),
+                                TypeCheck::Incompatible => Err(vec![TypeError::Mismatch {
+                                    expected: expected.clone(),
+                                    got,
+                                }]),
+                            },
+                        )?;
+                        *ret.clone()
+                    }
+                    inv_ty => return Err(vec![TypeError::NotCallable(inv_ty.clone())]),
+                };
+
+                Ok(ret_ty)
+            }
             crate::Expression::Call { function, args } => {
                 let (func_ty, args_ty) = merge_errors(
                     self.check_expression(function),

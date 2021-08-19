@@ -53,6 +53,9 @@ pub enum Token<'input> {
     #[token("=")]
     #[display(fmt = "=")]
     Equal,
+    #[token("=>")]
+    #[display(fmt = "=>")]
+    Arrow,
     #[regex("[a-zA-Z0-9_]+", priority = 10)]
     #[display(fmt = "identifier({})", _0)]
     Identifier(&'input str),

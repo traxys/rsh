@@ -42,6 +42,7 @@ extern {
 		"|" => lexer::Token::Pipe,
 		"[" => lexer::Token::LBracket,
 		"]" => lexer::Token::RBracket,
+		"=>" => lexer::Token::Arrow,
 		id => lexer::Token::Identifier(<&'input str>),
 		word => lexer::Token::Word(<&'input str>),
 		str => lexer::Token::StrLitteral(<&'input str>),
@@ -101,6 +102,11 @@ StrongExpression: Expression<'input> = {
 			},
 			None => exps,
 		}
+	},
+	<value:StrongExpression> "=>" <name:Identifier> "(" <args:Comma<StrongExpression>> ")" => Expression::Method {
+		name,
+		value: Box::new(value),
+		args,
 	},
 	<id:Identifier> => Expression::Variable(id),
 }
