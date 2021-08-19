@@ -19,6 +19,7 @@ use structopt::StructOpt;
 use crate::runtime::RuntimeError;
 
 mod builtin_functions;
+mod cowrc;
 pub mod lexer;
 pub mod runtime;
 pub mod type_checker;
