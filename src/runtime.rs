@@ -362,12 +362,16 @@ impl<'input> RuntimeCtx<'input> {
         match fstring {
             [super::StringPart::Text(v)] => Ok(CowRc::from(*v)),
             [super::StringPart::Variable(v)] => self.resolve_text(*v),
+            [super::StringPart::Expression(e)] => Ok(self.eval_expr(e)?.to_string()),
             _ => fstring
                 .iter()
                 .try_fold(String::new(), |mut current, segment| -> RuntimeResult<_> {
                     match segment {
                         super::StringPart::Text(s) => current.push_str(s),
                         super::StringPart::Variable(v) => current.push_str(&self.resolve_text(*v)?),
+                        super::StringPart::Expression(e) => {
+                            current.push_str(&self.eval_expr(e)?.to_string())
+                        }
                     }
                     Ok(current)
                 })

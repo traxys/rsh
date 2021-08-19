@@ -24,6 +24,9 @@ pub mod lexer;
 pub mod runtime;
 pub mod type_checker;
 
+type ParseError<'input, T> =
+    Result<T, lalrpop_util::ParseError<usize, lexer::Token<'input>, lexer::LexerError>>;
+
 lalrpop_mod!(pub rsh);
 
 type ShResult<T, E = Error> = std::result::Result<T, E>;
@@ -48,31 +51,41 @@ pub enum Error {
     RuntimeError(#[from] runtime::RuntimeError),
 }
 
-static VARIABLE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+").unwrap());
+static INTERPOLATION_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+|\$\{[^{}]*\}").unwrap());
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum StringPart<'input> {
+enum StringPart<'input> {
     Text(&'input str),
     Variable(Spur),
+    Expression(Expression<'input>),
 }
 
 impl<'input> StringPart<'input> {
-    pub fn interpolate(s: &'input str, ctx: &mut ShellContext) -> Vec<Self> {
+    pub fn interpolate(s: &'input str, ctx: &mut ShellContext) -> ParseError<'input, Vec<Self>> {
         let mut idx = 0;
         let mut interpolation = Vec::new();
 
-        for mtch in VARIABLE_REGEX.find_iter(s) {
+        for mtch in INTERPOLATION_REGEX.find_iter(s) {
             if mtch.start() != idx {
                 interpolation.push(Self::Text(&s[idx..mtch.start()]));
             }
             idx = mtch.end();
-            interpolation.push(Self::Variable(ctx.rodeo.get_or_intern(&mtch.as_str()[1..])));
+            let match_expr = &mtch.as_str()[1..];
+            if match_expr.starts_with("{") {
+                let input = match_expr.trim_start_matches('{').trim_end_matches('}');
+                let expr =
+                    rsh::StrongExpressionParser::new().parse(ctx, input, lexer::lexer(input))?;
+                interpolation.push(Self::Expression(expr));
+            } else {
+                interpolation.push(Self::Variable(ctx.rodeo.get_or_intern(&mtch.as_str()[1..])));
+            }
         }
         if idx < s.len() {
             interpolation.push(Self::Text(&s[idx..]))
         }
 
-        interpolation
+        Ok(interpolation)
     }
 }
 

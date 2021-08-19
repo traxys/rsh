@@ -246,8 +246,14 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         }
     }
 
-    fn check_interpolated(&mut self, _: &[super::StringPart]) -> TypeCheckResult {
-        Ok(())
+    fn check_interpolated(&mut self, parts: &[super::StringPart]) -> TypeCheckResult {
+        fold_unit(
+            parts.iter().filter_map(|part| match part {
+                crate::StringPart::Expression(e) => Some(e),
+                _ => None,
+            }),
+            |expr| self.check_expression(expr).map(|_| ()),
+        )
     }
 
     fn resolve(&self, name: Spur) -> Option<&Type> {

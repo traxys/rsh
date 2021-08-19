@@ -84,13 +84,13 @@ Expression: Expression<'input> = {
 			None => exps,
 		}
 	},
-	Word => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
-	istr => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
+	Word =>? Ok(Expression::Interpolated(StringPart::interpolate(<>, ctx)?)),
+	istr =>? Ok(Expression::Interpolated(StringPart::interpolate(<>, ctx)?)),
 	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
 };
 
-StrongExpression: Expression<'input> = {
-	istr => Expression::Interpolated(StringPart::interpolate(<>, ctx)),
+pub(crate) StrongExpression: Expression<'input> = {
+	istr =>? Ok(Expression::Interpolated(StringPart::interpolate(<>, ctx)?)),
 	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
 	Value => Expression::Value(<>),
 	<fun:Call> "(" <mut exps:(<StrongExpression> ",")*> <tl:StrongExpression?> ")" => Expression::Call {
