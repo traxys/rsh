@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate lalrpop_util;
+use builtin_functions::BuiltinFunction;
 use lasso::{Rodeo, Spur};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -10,12 +11,14 @@ use shared_child::SharedChild;
 use std::{
     path::PathBuf,
     process::{self, ExitStatus},
+    str::FromStr,
     sync::{Arc, RwLock},
 };
 use structopt::StructOpt;
 
 use crate::runtime::RuntimeError;
 
+mod builtin_functions;
 pub mod lexer;
 pub mod runtime;
 pub mod type_checker;
@@ -30,13 +33,17 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("ser/de error: {0}")]
     Serde(#[from] ron::Error),
+    #[error("bincode ser/de error: {0}")]
+    BinSerde(#[from] bincode::Error),
+    #[error("could not decode base64 string: {0}")]
+    Base64(#[from] base64::DecodeError),
     #[error("called exit: {0}")]
     Exited(i32),
     #[error("parse error: {0}")]
     Parse(String),
     #[error("type error: expected {expected} got {got}")]
     TypeError { expected: Type, got: Type },
-    #[error("runtime error")]
+    #[error("runtime error: {0}")]
     RuntimeError(#[from] runtime::RuntimeError),
 }
 
@@ -114,6 +121,7 @@ pub enum Type {
     String,
     Bytes,
     Function { ret: Box<Type>, args: Vec<Type> },
+    List(Box<Type>),
 }
 
 enum TypeCheck {
@@ -154,6 +162,7 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, ") -> {}", ret)
             }
+            Type::List(inner) => write!(f, "[{}]", inner),
         }
     }
 }
@@ -178,6 +187,7 @@ pub struct CommandContext<'input> {
 enum Value<'input> {
     String(&'input str),
     Int(i64),
+    List(Vec<Expression<'input>>),
 }
 
 impl<'input> Value<'input> {
@@ -185,6 +195,7 @@ impl<'input> Value<'input> {
         match self {
             Value::String(_) => Type::String,
             Value::Int(_) => Type::Int,
+            Value::List(_) => Type::List(Box::new(Type::Dynamic)),
         }
     }
 }
@@ -204,6 +215,7 @@ enum Expression<'input> {
 
 pub struct ShellContext {
     current_process: Arc<RwLock<Option<SharedChild>>>,
+    builtins: Vec<BuiltinFunction>,
     last_exit: Option<ExitStatus>,
     rodeo: Rodeo,
 }
@@ -214,6 +226,7 @@ impl ShellContext {
             current_process: Arc::new(RwLock::new(None)),
             last_exit: None,
             rodeo: Rodeo::new(),
+            builtins: builtin_functions::builtins(),
         }
     }
 }
@@ -269,9 +282,12 @@ fn interactive_loop<E: rustyline::Helper>(
             })
             .unwrap_or_else(|| Ok(String::from(">> ")))?;
 
+        drop(rt_ctx);
+
         let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
+                let mut rt_ctx = runtime::RuntimeCtx::new(sh_ctx);
                 let parsed = match rsh::CommandContextParser::new().parse(
                     rt_ctx.shell_ctx,
                     &line,
@@ -296,23 +312,72 @@ fn interactive_loop<E: rustyline::Helper>(
     }
 }
 
+enum AstFormat {
+    Ron,
+    Bincode,
+}
+
+impl FromStr for AstFormat {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "ron" => Ok(Self::Ron),
+            "bincode" => Ok(Self::Bincode),
+            _ => Err("no such ast variant"),
+        }
+    }
+}
+
 #[derive(StructOpt)]
 enum Builtin {
-    Ast { code: String },
-    RunAst { ast: String },
+    Ast {
+        code: String,
+        #[structopt(short, long)]
+        pretty: bool,
+        #[structopt(short, long, default_value = "ron", possible_values = &["ron", "bincode"])]
+        format: AstFormat,
+    },
+    RunAst {
+        ast: String,
+        #[structopt(short, long)]
+        bincode: bool,
+    },
 }
 
 impl Builtin {
     pub fn execute(&self, shell_ctx: &mut ShellContext) -> ShResult<()> {
         match self {
-            Builtin::Ast { code } => {
+            Builtin::Ast {
+                code,
+                pretty,
+                format,
+            } => {
                 let parsed = rsh::CommandContextParser::new()
                     .parse(shell_ctx, code, lexer::lexer(code))
                     .map_err(|err| Error::Parse(err.to_string()))?;
-                println!("{}", ron::to_string(&parsed)?);
+                match format {
+                    AstFormat::Ron => println!(
+                        "{}",
+                        if *pretty {
+                            ron::ser::to_string_pretty(&parsed, Default::default())?
+                        } else {
+                            ron::to_string(&parsed)?
+                        }
+                    ),
+                    AstFormat::Bincode => {
+                        println!("{}", base64::encode(bincode::serialize(&parsed)?))
+                    }
+                }
             }
-            Builtin::RunAst { ast } => {
-                let ast: CommandContext<'_> = ron::from_str(ast)?;
+            Builtin::RunAst { ast, bincode } => {
+                let data;
+                let ast: CommandContext<'_> = if *bincode {
+                    data = base64::decode(ast)?;
+                    bincode::deserialize(&data)?
+                } else {
+                    ron::from_str(ast)?
+                };
                 let mut rt_ctx = RuntimeCtx::new(shell_ctx);
                 rt_ctx.run_cmd_ctx(ast)?;
             }

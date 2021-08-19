@@ -40,6 +40,8 @@ extern {
 		";" => lexer::Token::Semicolon,
 		":" => lexer::Token::Colon,
 		"|" => lexer::Token::Pipe,
+		"[" => lexer::Token::LBracket,
+		"]" => lexer::Token::RBracket,
 		id => lexer::Token::Identifier(<&'input str>),
 		word => lexer::Token::Word(<&'input str>),
 		str => lexer::Token::StrLitteral(<&'input str>),
@@ -48,9 +50,20 @@ extern {
 	}
 }
 
+Comma<T>: Vec<T> = { // (1)
+    <mut v:(<T> ",")*> <e:T?> => match e { // (2)
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
 Value: Value<'input> = {
 	str => Value::String(<>),
 	int => Value::Int(<>),
+	"[" <exprs:Comma<StrongExpression>> "]" => Value::List(exprs),
 };
 
 Word: &'input str = {

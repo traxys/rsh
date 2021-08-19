@@ -17,13 +17,9 @@ pub enum TypeError {
 fn root_types(shell_ctx: &mut ShellContext) -> HashMap<Spur, Type> {
     let mut tys = HashMap::new();
     tys.insert(shell_ctx.rodeo.get_or_intern_static("exit"), Type::Int);
-    tys.insert(
-        shell_ctx.rodeo.get_or_intern_static("s"),
-        Type::Function {
-            ret: Box::new(Type::String),
-            args: vec![Type::Dynamic],
-        },
-    );
+    for f in &shell_ctx.builtins {
+        tys.insert(shell_ctx.rodeo.get_or_intern_static(f.name), f.ty());
+    }
     tys
 }
 

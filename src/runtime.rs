@@ -3,6 +3,7 @@ use crate::{
     Builtin, RedirectionType, ShellContext, Type,
 };
 use lasso::Spur;
+use serde::{ser::SerializeSeq, Serialize};
 use shared_child::SharedChild;
 use std::{
     borrow::Cow,
@@ -18,10 +19,12 @@ pub type RuntimeResult<T> = Result<T, RuntimeError>;
 pub enum RuntimeError {
     #[error("exit {0}")]
     Exit(i32),
-    #[error("i/o error")]
+    #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("ser/de error")]
-    SerDe(#[from] ron::Error),
+    #[error("ser/de error: {0}")]
+    SerDe(#[from] bincode::Error),
+    #[error("json ser/de error: {0}")]
+    JsonSerDe(#[from] serde_json::Error),
     #[error("cycle in evaluation: {:?}", _0)]
     EvaluationCycle(Vec<String>),
     #[error("undefined: {}", _0)]
@@ -31,10 +34,12 @@ pub enum RuntimeError {
     #[error("type {} is not callable", _0)]
     UncallableType(Type),
     #[error("unexpected type: expected {}, got {}", expected, got)]
-    UnexpctedType { expected: Type, got: Type },
+    UnexpectedType { expected: Type, got: Type },
     #[error("unexpected argument count: expected {}, got {}", expected, got)]
     InvalidArgCount { expected: usize, got: usize },
 }
+
+// struct ValuePtr<'input>(Rc<Value<'input>>);
 
 #[derive(Debug)]
 enum Value<'input> {
@@ -42,9 +47,29 @@ enum Value<'input> {
     Int(i64),
     Bytes(Vec<u8>),
     NativeFn(usize),
+    List(im::Vector<Rc<Value<'input>>>),
 }
 
-const NATIVE_FNS: &[&'static str] = &["s"];
+impl<'input> Serialize for Value<'input> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Value::Str(s) => serializer.serialize_str(s),
+            Value::Int(i) => serializer.serialize_i64(*i),
+            Value::Bytes(b) => serializer.serialize_bytes(b),
+            Value::NativeFn(f) => serializer.serialize_newtype_struct("NativeFn", f),
+            Value::List(l) => {
+                let mut seq = serializer.serialize_seq(Some(l.len()))?;
+                for e in l.iter() {
+                    seq.serialize_element(&**e)?;
+                }
+                seq.end()
+            }
+        }
+    }
+}
 
 impl<'input> Value<'input> {
     pub fn to_string(&self) -> Cow<'input, str> {
@@ -52,7 +77,20 @@ impl<'input> Value<'input> {
             Value::Str(v) => v.clone(),
             Value::Int(i) => Cow::Owned(i.to_string()),
             Value::Bytes(v) => String::from_utf8_lossy(v).to_string().into(),
-            Value::NativeFn(id) => format!("<native fn {}>", NATIVE_FNS[*id],).into(),
+            Value::NativeFn(id) => format!("<native fn {}>", id).into(),
+            Value::List(l) => match l.len() {
+                0 => "[]".into(),
+                1 => Cow::Owned(format!("[{}]", l[0].to_string())),
+                _ => {
+                    let mut str = format!("[{}", l[0].to_string());
+                    for elem in l.iter().skip(1) {
+                        str += ",";
+                        str += &*elem.to_string();
+                    }
+                    str += "]";
+                    Cow::Owned(str)
+                }
+            },
         }
     }
 
@@ -61,7 +99,18 @@ impl<'input> Value<'input> {
             Value::Str(_) => Type::String,
             Value::Int(_) => Type::Int,
             Value::Bytes(_) => Type::Bytes,
+            Value::List(_) => Type::List(Box::new(Type::Dynamic)),
             Value::NativeFn(_id) => todo!(),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> RuntimeResult<&str> {
+        match self {
+            Value::Str(s) => Ok(s),
+            v => Err(RuntimeError::UnexpectedType {
+                expected: Type::String,
+                got: v.ty(),
+            }),
         }
     }
 }
@@ -81,9 +130,9 @@ pub struct Overlay<'input> {
 
 fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
     let mut values = HashMap::new();
-    for (id, name) in NATIVE_FNS.iter().enumerate() {
+    for (id, f) in sh_ctx.builtins.iter().enumerate() {
         values.insert(
-            sh_ctx.rodeo.get_or_intern_static(name),
+            sh_ctx.rodeo.get_or_intern_static(f.name),
             Rc::new(Value::NativeFn(id)),
         );
     }
@@ -95,6 +144,46 @@ fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
 }
 
 impl<'input> RuntimeCtx<'input> {
+    fn call_native_function(
+        &mut self,
+        id: usize,
+        args: Vec<Rc<Value<'input>>>,
+    ) -> RuntimeResult<Rc<Value<'input>>> {
+        fn check_args<'input>(expected: usize, args: &[Rc<Value<'input>>]) -> RuntimeResult<()> {
+            if args.len() != expected {
+                Err(RuntimeError::InvalidArgCount {
+                    expected,
+                    got: args.len(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        match id {
+            // s
+            0 => {
+                check_args(1, &args)?;
+                Ok(Rc::new(Value::Str(args[0].to_string())))
+            }
+            // env =>
+            1 => {
+                check_args(2, &args)?;
+                let name = args[0].as_str()?;
+                let val = args[1].as_str()?;
+                std::env::set_var(name, val);
+                Ok(args.into_iter().nth(1).unwrap())
+            }
+            2 => {
+                check_args(1, &args)?;
+                Ok(Rc::new(Value::Str(
+                    serde_json::to_string(&*args[0])?.into(),
+                )))
+            }
+            _ => unreachable!("invalid native function got called ({})", id),
+        }
+    }
+
     pub fn new(shell_ctx: &'input mut ShellContext) -> Self {
         Self {
             exit: shell_ctx.rodeo.get_or_intern_static("exit"),
@@ -360,32 +449,6 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn call_native_function(
-        &mut self,
-        id: usize,
-        args: Vec<Rc<Value<'input>>>,
-    ) -> RuntimeResult<Rc<Value<'input>>> {
-        fn check_args<'input>(expected: usize, args: &[Rc<Value<'input>>]) -> RuntimeResult<()> {
-            if args.len() != expected {
-                Err(RuntimeError::InvalidArgCount {
-                    expected,
-                    got: args.len(),
-                })
-            } else {
-                Ok(())
-            }
-        }
-
-        match id {
-            // s
-            0 => {
-                check_args(1, &args)?;
-                Ok(Rc::new(Value::Str(args[0].to_string())))
-            }
-            _ => unreachable!("invalid native function got called ({})", id),
-        }
-    }
-
     fn call_function(
         &mut self,
         function: Rc<Value<'input>>,
@@ -403,13 +466,19 @@ impl<'input> RuntimeCtx<'input> {
                 process::Command::new(std::env::current_exe()?)
                     .arg("builtin")
                     .arg("run-ast")
-                    .arg(ron::to_string(code)?)
+                    .arg("-b")
+                    .arg(base64::encode(bincode::serialize(code)?))
                     .output()?
                     .stdout,
             ))),
             super::Expression::Value(v) => match v {
                 super::Value::String(s) => Ok(Rc::new(Value::Str(Cow::from(*s)))),
                 super::Value::Int(i) => Ok(Rc::new(Value::Int(*i))),
+                super::Value::List(l) => Ok(Rc::new(Value::List(
+                    l.iter()
+                        .map(|expr| self.eval_expr(expr))
+                        .collect::<RuntimeResult<_>>()?,
+                ))),
             },
             super::Expression::Call { function, args } => {
                 let function = self.eval_expr(function)?;
