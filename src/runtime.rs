@@ -44,8 +44,21 @@ enum Value<'input> {
     Str(CowRc<'input, str>),
     Int(i64),
     Bytes(Rc<Vec<u8>>),
-    NativeFn(usize),
+    Function(FunctionValue),
     List(im::Vector<Value<'input>>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FunctionValue {
+    NativeFn(usize),
+}
+
+impl FunctionValue {
+    fn to_string(&self) -> String {
+        match self {
+            FunctionValue::NativeFn(id) => format!("<native fn {}>", id),
+        }
+    }
 }
 
 impl<'input> Serialize for Value<'input> {
@@ -57,7 +70,6 @@ impl<'input> Serialize for Value<'input> {
             Value::Str(s) => serializer.serialize_str(s),
             Value::Int(i) => serializer.serialize_i64(*i),
             Value::Bytes(b) => serializer.serialize_bytes(b),
-            Value::NativeFn(f) => serializer.serialize_newtype_struct("NativeFn", f),
             Value::List(l) => {
                 let mut seq = serializer.serialize_seq(Some(l.len()))?;
                 for e in l.iter() {
@@ -65,6 +77,7 @@ impl<'input> Serialize for Value<'input> {
                 }
                 seq.end()
             }
+            Value::Function(_) => Err(serde::ser::Error::custom("functions are not serializable")),
         }
     }
 }
@@ -75,7 +88,6 @@ impl<'input> Value<'input> {
             Value::Str(v) => v.clone(),
             Value::Int(i) => i.to_string().into(),
             Value::Bytes(v) => String::from_utf8_lossy(v).to_string().into(),
-            Value::NativeFn(id) => format!("<native fn {}>", id).into(),
             Value::List(l) => match l.len() {
                 0 => "[]".into(),
                 1 => format!("[{}]", l[0].to_string()).into(),
@@ -89,6 +101,7 @@ impl<'input> Value<'input> {
                     str.into()
                 }
             },
+            Value::Function(f) => f.to_string().into(),
         }
     }
 
@@ -98,7 +111,7 @@ impl<'input> Value<'input> {
             Value::Int(_) => Type::Int,
             Value::Bytes(_) => Type::Bytes,
             Value::List(_) => Type::List(Box::new(Type::Dynamic)),
-            Value::NativeFn(_id) => todo!(),
+            Value::Function(_) => todo!(),
         }
     }
 
@@ -131,7 +144,7 @@ fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
     for (id, f) in sh_ctx.builtins.iter().enumerate() {
         values.insert(
             sh_ctx.rodeo.get_or_intern_static(f.name),
-            Value::NativeFn(id),
+            Value::Function(FunctionValue::NativeFn(id)),
         );
     }
     Overlay {
@@ -455,7 +468,9 @@ impl<'input> RuntimeCtx<'input> {
         args: Vec<Value<'input>>,
     ) -> RuntimeResult<Value<'input>> {
         match function {
-            Value::NativeFn(id) => self.call_native_function(id, args),
+            Value::Function(f) => match f {
+                FunctionValue::NativeFn(id) => self.call_native_function(id, args),
+            },
             val => return Err(RuntimeError::UncallableType(val.ty())),
         }
     }
