@@ -134,8 +134,11 @@ pub enum Type {
     Int,
     String,
     Bytes,
+    Private,
     Function { ret: Box<Type>, args: Vec<Type> },
     List(Box<Type>),
+    Iterator(Box<Type>),
+    Option(Box<Type>),
 }
 
 enum TypeCheck {
@@ -164,6 +167,7 @@ impl std::fmt::Display for Type {
             Type::Int => write!(f, "int"),
             Type::String => write!(f, "str"),
             Type::Bytes => write!(f, "bytes"),
+            Type::Private => write!(f, "<private>"),
             Type::Function { ret, args } => {
                 write!(f, "fn(")?;
                 if args.len() > 1 {
@@ -177,6 +181,8 @@ impl std::fmt::Display for Type {
                 write!(f, ") -> {}", ret)
             }
             Type::List(inner) => write!(f, "[{}]", inner),
+            Type::Iterator(item) => write!(f, "Iterator<{}>", item),
+            Type::Option(item) => write!(f, "Option<{}>", item),
         }
     }
 }

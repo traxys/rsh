@@ -12,7 +12,7 @@ bstr = { version = "0.2.16", features = ["serde1"] }
 color-eyre = "0.5.11"
 ctrlc = "3.2.0"
 derive_more = "0.99.14"
-im = { version = "15.0.0", features = ["serde"] }
+gc = { git = "https://github.com/Manishearth/rust-gc.git", features = ["derive", "serde"] }
 itertools = "0.10.1"
 lalrpop-util = "0.19.6"
 lasso = { version = "0.5.1", features = ["serialize"]}

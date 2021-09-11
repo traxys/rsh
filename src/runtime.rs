@@ -1,8 +1,8 @@
 use crate::{
-    cowrc::CowRc,
     type_checker::{TypeCheckerCtx, TypeError},
     Builtin, RedirectionType, ShellContext, Type,
 };
+use gc::{Finalize, Gc, GcCell, Trace};
 use lasso::Spur;
 use serde::{ser::SerializeSeq, Serialize};
 use shared_child::SharedChild;
@@ -37,20 +37,37 @@ pub enum RuntimeError {
     UnexpectedType { expected: Type, got: Type },
     #[error("unexpected argument count: expected {}, got {}", expected, got)]
     InvalidArgCount { expected: usize, got: usize },
+    #[error("unexpected error: {}", _0)]
+    UnexpectedError(String),
 }
 
-#[derive(Debug, Clone)]
-enum Value<'input> {
-    Str(CowRc<'input, str>),
+#[derive(Debug, Clone, Trace, Finalize)]
+// TODO: optimize such that we don't need to box everything like numbers for example
+enum Value {
+    Str(Rc<String>),
     Int(i64),
     Bytes(Rc<Vec<u8>>),
     Function(FunctionValue),
-    List(im::Vector<Value<'input>>),
+    List(Gc<Vec<GcCell<Value>>>),
+    Iterator(IteratorValue),
+    Option(Option<Gc<Value>>),
+    Private(PrivateValue),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Trace, Finalize)]
+struct IteratorValue {
+    value: Gc<GcCell<Value>>,
+    next: FunctionValue,
+}
+
+#[derive(Clone, Debug, Trace, Finalize)]
+enum PrivateValue {
+    Range { start: i64, end: i64 },
+}
+
+#[derive(Debug, Clone, Trace, Finalize)]
 enum FunctionValue {
-    NativeFn(usize),
+    NativeFn(isize),
 }
 
 impl FunctionValue {
@@ -61,7 +78,7 @@ impl FunctionValue {
     }
 }
 
-impl<'input> Serialize for Value<'input> {
+impl Serialize for Value {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -73,35 +90,82 @@ impl<'input> Serialize for Value<'input> {
             Value::List(l) => {
                 let mut seq = serializer.serialize_seq(Some(l.len()))?;
                 for e in l.iter() {
-                    seq.serialize_element(&*e)?;
+                    seq.serialize_element(&*e.borrow())?;
                 }
                 seq.end()
             }
             Value::Function(_) => Err(serde::ser::Error::custom("functions are not serializable")),
+            Value::Iterator { .. } => {
+                Err(serde::ser::Error::custom("iterators are not serializable"))
+            }
+            Value::Option(None) => serializer.serialize_none(),
+            Value::Option(Some(v)) => serializer.serialize_some(&*v),
+            Value::Private(_) => Err(serde::ser::Error::custom(
+                "private values are not serializable",
+            )),
         }
     }
 }
 
-impl<'input> Value<'input> {
-    pub fn to_string(&self) -> CowRc<'input, str> {
+macro_rules! as_ty {
+    (fn $name:ident -> $ret_ty:ty {
+        $variant:ident | expected $expected:expr
+    }) => {
+        pub(crate) fn $name(&self) -> RuntimeResult<&$ret_ty> {
+            match self {
+                Value::$variant(v) => Ok(v),
+                v => Err(RuntimeError::UnexpectedType {
+                    expected: $expected,
+                    got: v.ty(),
+                }),
+            }
+        }
+    };
+
+    (fn mut $name:ident -> $ret_ty:ty {
+        $variant:ident | expected $expected:expr
+    }) => {
+        pub(crate) fn $name(&mut self) -> RuntimeResult<&mut $ret_ty> {
+            match self {
+                Value::$variant(v) => Ok(v),
+                v => Err(RuntimeError::UnexpectedType {
+                    expected: $expected,
+                    got: v.ty(),
+                }),
+            }
+        }
+    };
+}
+
+impl Value {
+    pub fn to_string(&self) -> Rc<String> {
         match self {
             Value::Str(v) => v.clone(),
             Value::Int(i) => i.to_string().into(),
             Value::Bytes(v) => String::from_utf8_lossy(v).to_string().into(),
-            Value::List(l) => match l.len() {
-                0 => "[]".into(),
-                1 => format!("[{}]", l[0].to_string()).into(),
-                _ => {
-                    let mut str = format!("[{}", l[0].to_string());
-                    for elem in l.iter().skip(1) {
+            Value::List(l) => match l.as_slice() {
+                [] => "[]".to_owned().into(),
+                [x] => format!("[{}]", x.borrow().to_string()).into(),
+                [x, rest @ ..] => {
+                    let mut str = format!("[{}", x.borrow().to_string());
+                    for elem in rest.iter() {
                         str += ",";
-                        str += &*elem.to_string();
+                        str += &*elem.borrow().to_string();
                     }
                     str += "]";
                     str.into()
                 }
             },
+            Value::Option(None) => "None".to_owned().into(),
+            Value::Option(Some(v)) => format!("Some({})", v.to_string()).into(),
             Value::Function(f) => f.to_string().into(),
+            Value::Iterator(IteratorValue { value, next }) => format!(
+                "iterator{{value:{},next:{}}}",
+                value.borrow().to_string(),
+                next.to_string()
+            )
+            .into(),
+            Value::Private(_) => "<private>".to_owned().into(),
         }
     }
 
@@ -110,20 +174,40 @@ impl<'input> Value<'input> {
             Value::Str(_) => Type::String,
             Value::Int(_) => Type::Int,
             Value::Bytes(_) => Type::Bytes,
+            Value::Option(None) => Type::Option(Box::new(Type::Dynamic)),
+            Value::Option(Some(v)) => Type::Option(Box::new(v.ty())),
             Value::List(_) => Type::List(Box::new(Type::Dynamic)),
             Value::Function(_) => todo!(),
+            Value::Iterator { .. } => todo!(),
+            Value::Private(_) => Type::Private,
         }
     }
 
-    pub(crate) fn as_str(&self) -> RuntimeResult<&str> {
+    pub(crate) fn as_int(&self) -> RuntimeResult<i64> {
         match self {
-            Value::Str(s) => Ok(s),
+            Value::Int(i) => Ok(*i),
             v => Err(RuntimeError::UnexpectedType {
-                expected: Type::String,
+                expected: Type::Int,
                 got: v.ty(),
             }),
         }
     }
+
+    as_ty!(fn as_str -> str {
+        Str | expected Type::String
+    });
+
+    /* as_ty!(fn as_priv -> PrivateValue {
+        Private | expected Type::Private
+    }); */
+
+    as_ty!(fn mut as_priv_mut -> PrivateValue {
+        Private | expected Type::Private
+    });
+
+    as_ty!(fn as_iter -> IteratorValue {
+        Iterator | expected Type::Iterator(Box::new(Type::Dynamic))
+    });
 }
 
 pub struct RuntimeCtx<'input> {
@@ -135,7 +219,7 @@ pub struct RuntimeCtx<'input> {
 #[derive(Debug)]
 pub struct Overlay<'input> {
     definitions: HashMap<Spur, super::Expression<'input>>,
-    values: HashMap<Spur, Value<'input>>,
+    values: HashMap<Spur, Value>,
     currently_evaluating: HashSet<Spur>,
 }
 
@@ -144,7 +228,7 @@ fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
     for (id, f) in sh_ctx.builtins.iter().enumerate() {
         values.insert(
             sh_ctx.rodeo.get_or_intern_static(f.name),
-            Value::Function(FunctionValue::NativeFn(id)),
+            Value::Function(FunctionValue::NativeFn(id as isize)),
         );
     }
     Overlay {
@@ -155,12 +239,8 @@ fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
 }
 
 impl<'input> RuntimeCtx<'input> {
-    fn call_native_function(
-        &mut self,
-        id: usize,
-        args: Vec<Value<'input>>,
-    ) -> RuntimeResult<Value<'input>> {
-        fn check_args<'input>(expected: usize, args: &[Value<'input>]) -> RuntimeResult<()> {
+    fn call_native_function(&mut self, id: isize, args: Vec<Value>) -> RuntimeResult<Value> {
+        fn check_args(expected: usize, args: &[Value]) -> RuntimeResult<()> {
             if args.len() != expected {
                 Err(RuntimeError::InvalidArgCount {
                     expected,
@@ -172,6 +252,20 @@ impl<'input> RuntimeCtx<'input> {
         }
 
         match id {
+            // Negative index are private non named functions
+            // increment range iterator and return value
+            -1 => {
+                let it = args[0].as_iter()?;
+                let mut value = it.value.borrow_mut();
+                match value.as_priv_mut()? {
+                    PrivateValue::Range { start, end } if *start < *end => {
+                        let ret = *start;
+                        *start += 1;
+                        Ok(Value::Option(Some(Gc::new(Value::Int(ret)))))
+                    }
+                    _ => Ok(Value::Option(None)),
+                }
+            }
             // s
             0 => {
                 check_args(1, &args)?;
@@ -185,9 +279,28 @@ impl<'input> RuntimeCtx<'input> {
                 std::env::set_var(name, val);
                 Ok(args.into_iter().nth(1).unwrap())
             }
+            // json
             2 => {
                 check_args(1, &args)?;
                 Ok(Value::Str(serde_json::to_string(&args[0])?.into()))
+            }
+            // range
+            3 => {
+                check_args(2, &args)?;
+                let start = args[0].as_int()?;
+                let end = args[1].as_int()?;
+                let range = Value::Private(PrivateValue::Range { start, end });
+                Ok(Value::Iterator(IteratorValue {
+                    value: Gc::new(GcCell::new(range)),
+                    next: FunctionValue::NativeFn(-1),
+                }))
+            }
+            // next
+            4 => {
+                check_args(1, &args)?;
+                let it = args[0].as_iter()?;
+                let next = self.call_function_value(&it.next, vec![args[0].clone()]);
+                next
             }
             _ => unreachable!("invalid native function got called ({})", id),
         }
@@ -371,9 +484,9 @@ impl<'input> RuntimeCtx<'input> {
     fn run_interpolation(
         &mut self,
         fstring: &[super::StringPart<'input>],
-    ) -> RuntimeResult<CowRc<'input, str>> {
+    ) -> RuntimeResult<Rc<String>> {
         match fstring {
-            [super::StringPart::Text(v)] => Ok(CowRc::from(*v)),
+            [super::StringPart::Text(v)] => Ok(Rc::from(v.to_string())),
             [super::StringPart::Variable(v)] => self.resolve_text(*v),
             [super::StringPart::Expression(e)] => Ok(self.eval_expr(e)?.to_string()),
             _ => fstring
@@ -388,11 +501,11 @@ impl<'input> RuntimeCtx<'input> {
                     }
                     Ok(current)
                 })
-                .map(CowRc::from),
+                .map(Rc::from),
         }
     }
 
-    fn resolve_text(&mut self, name: Spur) -> RuntimeResult<CowRc<'input, str>> {
+    fn resolve_text(&mut self, name: Spur) -> RuntimeResult<Rc<String>> {
         match self.resolve(name)? {
             None => {
                 eprintln!(
@@ -402,13 +515,13 @@ impl<'input> RuntimeCtx<'input> {
                         .try_resolve(&name)
                         .unwrap_or("<unknown>")
                 );
-                Ok("".into())
+                Ok("".to_owned().into())
             }
             Some(v) => Ok(v.to_string()),
         }
     }
 
-    fn rec_resolve(&mut self, name: Spur) -> RuntimeResult<Option<Value<'input>>> {
+    fn rec_resolve(&mut self, name: Spur) -> RuntimeResult<Option<Value>> {
         for idx in (0..self.overlays.len()).rev() {
             let overlay = &mut self.overlays[idx];
             let expr = match overlay.values.get(&name) {
@@ -448,7 +561,7 @@ impl<'input> RuntimeCtx<'input> {
         Ok(None)
     }
 
-    fn resolve(&mut self, name: Spur) -> RuntimeResult<Option<Value<'input>>> {
+    fn resolve(&mut self, name: Spur) -> RuntimeResult<Option<Value>> {
         if name == self.exit {
             Ok(Some(Value::Int(
                 self.shell_ctx
@@ -462,20 +575,24 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn call_function(
-        &mut self,
-        function: Value<'input>,
-        args: Vec<Value<'input>>,
-    ) -> RuntimeResult<Value<'input>> {
+    fn call_function(&mut self, function: &Value, args: Vec<Value>) -> RuntimeResult<Value> {
         match function {
-            Value::Function(f) => match f {
-                FunctionValue::NativeFn(id) => self.call_native_function(id, args),
-            },
+            Value::Function(f) => self.call_function_value(f, args),
             val => return Err(RuntimeError::UncallableType(val.ty())),
         }
     }
 
-    fn eval_expr(&mut self, expr: &super::Expression<'input>) -> RuntimeResult<Value<'input>> {
+    fn call_function_value(
+        &mut self,
+        function_value: &FunctionValue,
+        args: Vec<Value>,
+    ) -> RuntimeResult<Value> {
+        match function_value {
+            FunctionValue::NativeFn(id) => self.call_native_function(*id, args),
+        }
+    }
+
+    fn eval_expr(&mut self, expr: &super::Expression<'input>) -> RuntimeResult<Value> {
         match expr {
             super::Expression::SubShell(code) => Ok(Value::Bytes(Rc::new(
                 process::Command::new(std::env::current_exe()?)
@@ -487,13 +604,13 @@ impl<'input> RuntimeCtx<'input> {
                     .stdout,
             ))),
             super::Expression::Value(v) => match v {
-                super::Value::String(s) => Ok(Value::Str(CowRc::from(*s))),
+                super::Value::String(s) => Ok(Value::Str(Rc::from(s.to_string()))),
                 super::Value::Int(i) => Ok(Value::Int(*i)),
-                super::Value::List(l) => Ok(Value::List(
+                super::Value::List(l) => Ok(Value::List(Gc::new(
                     l.iter()
-                        .map(|expr| self.eval_expr(expr))
+                        .map(|expr| -> RuntimeResult<_> { Ok(GcCell::new(self.eval_expr(expr)?)) })
                         .collect::<RuntimeResult<_>>()?,
-                )),
+                ))),
             },
             super::Expression::Call { function, args } => {
                 let function = self.eval_expr(function)?;
@@ -501,7 +618,7 @@ impl<'input> RuntimeCtx<'input> {
                     .iter()
                     .map(|arg| self.eval_expr(arg))
                     .collect::<RuntimeResult<_>>()?;
-                self.call_function(function, args)
+                self.call_function(&function, args)
             }
             super::Expression::Method { value, name, args } => {
                 let args = std::iter::once(&**value)
@@ -516,7 +633,7 @@ impl<'input> RuntimeCtx<'input> {
                             .unwrap_or("<unkown>")
                             .to_owned(),
                     )),
-                    Some(function) => self.call_function(function, args),
+                    Some(function) => self.call_function(&function, args),
                 }
             }
             super::Expression::Interpolated(i) => self.run_interpolation(i).map(Value::Str),
