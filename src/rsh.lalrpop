@@ -199,5 +199,5 @@ StatementLine: Statement<'input> = {
 };
 
 pub Script: Vec<Statement<'input>> = {
-	<s:StatementLine*> => s,
+	<_nl:"\n"*> <s:StatementLine*> => s,
 };

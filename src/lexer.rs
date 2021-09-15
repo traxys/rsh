@@ -111,7 +111,7 @@ pub enum Token<'input> {
     #[display(fmt = "|")]
     Pipe,
     #[error]
-    //#[regex(r"(\#|)[^\n]*", logos::skip)]
+    #[regex(r"#[^\n]*\n", logos::skip)]
     #[regex(r"[ \t]", logos::skip)]
     #[display(fmt = "error")]
     Error,
