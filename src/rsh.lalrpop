@@ -13,6 +13,7 @@ use crate::{
 	Value,
 	Expression,
 	ShellContext,
+	Statement,
 };
 use lasso::Spur;
 
@@ -42,6 +43,9 @@ extern {
 		"|" => lexer::Token::Pipe,
 		"[" => lexer::Token::LBracket,
 		"]" => lexer::Token::RBracket,
+		"{" => lexer::Token::LBrace,
+		"}" => lexer::Token::RBrace,
+		"cmd" => lexer::Token::Cmd,
 		"=>" => lexer::Token::Arrow,
 		id => lexer::Token::Identifier(<&'input str>),
 		word => lexer::Token::Word(<&'input str>),
@@ -178,10 +182,22 @@ pub CommandContext: CommandContext<'input> = {
 	<commands:CommandList> => CommandContext{commands, variables: Vec::new()},
 };
 
-
-pub Script: Vec<CommandContext<'input>> = {
+CmdBlock: Vec<CommandContext<'input>> = {
 	<mut cmds:(<CommandContext> "\n")*> <trl:CommandContext> <_last_newline:"\n"?> => {
 		cmds.push(trl);
 		cmds
 	}
+};
+
+Statement: Statement<'input> = {
+	"let" <VariableDefinition> ";" => Statement::VarDef(<>),
+	"cmd" "{" <_nl:"\n"?> <cmds:CmdBlock> "}" => Statement::Cmd(cmds),
+};
+
+StatementLine: Statement<'input> = {
+	<s:Statement> <_nl:"\n"*> => s,
+};
+
+pub Script: Vec<Statement<'input>> = {
+	<s:StatementLine*> => s,
 };

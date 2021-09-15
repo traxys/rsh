@@ -204,6 +204,14 @@ pub struct CommandContext<'input> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Statement<'input> {
+    #[serde(borrow)]
+    VarDef(VariableDefinition<'input>),
+    #[serde(borrow)]
+    Cmd(Vec<CommandContext<'input>>)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum Value<'input> {
     String(&'input str),
     Int(i64),
@@ -469,8 +477,8 @@ fn main() -> color_eyre::Result<()> {
         let parsed =
             report!(rsh::ScriptParser::new().parse(&mut shell_ctx, &script, lexer::lexer(&script)));
         let mut rt_ctx = RuntimeCtx::new(&mut shell_ctx);
-        for command in parsed {
-            match rt_ctx.run_cmd_ctx(command) {
+        for stmt in parsed {
+            match rt_ctx.run_statement(stmt) {
                 Ok(_) => (),
                 Err(RuntimeError::Exit(i)) => process::exit(i),
                 Err(e) => {

@@ -1,6 +1,6 @@
 use crate::{
     type_checker::{TypeCheckerCtx, TypeError},
-    Builtin, RedirectionType, ShellContext, Type,
+    Builtin, RedirectionType, ShellContext, Statement, Type,
 };
 use gc::{Finalize, Gc, GcCell, Trace};
 use lasso::Spur;
@@ -321,6 +321,19 @@ impl<'input> RuntimeCtx<'input> {
                 .iter()
                 .map(|def| (def.name, def.expr.clone()))
                 .collect(),
+            currently_evaluating: HashSet::new(),
+        };
+        self.overlays.push(overlay);
+    }
+
+    fn enter_single_overlay(&mut self, definition: super::VariableDefinition<'input>) {
+        let overlay = Overlay {
+            values: HashMap::new(),
+            definitions: {
+                let mut map = HashMap::new();
+                map.insert(definition.name, definition.expr.clone());
+                map
+            },
             currently_evaluating: HashSet::new(),
         };
         self.overlays.push(overlay);
@@ -647,5 +660,19 @@ impl<'input> RuntimeCtx<'input> {
                 ))
             }),
         }
+    }
+
+    pub fn run_statement(&mut self, statement: Statement<'input>) -> RuntimeResult<()> {
+        match statement {
+            Statement::VarDef(v) => {
+                self.enter_single_overlay(v);
+            }
+            Statement::Cmd(cmds) => {
+                for cmd in cmds {
+                    self.run_cmd_ctx(cmd)?;
+                }
+            }
+        }
+        Ok(())
     }
 }

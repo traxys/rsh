@@ -11,6 +11,9 @@ pub enum Token<'input> {
     #[token("let", priority = 100)]
     #[display(fmt = "let")]
     Let,
+    #[token("cmd", priority = 100)]
+    #[display(fmt = "cmd")]
+    Cmd,
     #[token("in", priority = 100)]
     #[display(fmt = "in")]
     In,
@@ -32,6 +35,12 @@ pub enum Token<'input> {
     #[token("]")]
     #[display(fmt = "]")]
     RBracket,
+    #[token("{")]
+    #[display(fmt = "{{")]
+    LBrace,
+    #[token("}")]
+    #[display(fmt = "}}")]
+    RBrace,
     #[token("<")]
     #[display(fmt = "<")]
     InRedir,
@@ -103,7 +112,7 @@ pub enum Token<'input> {
     Pipe,
     #[error]
     //#[regex(r"(\#|)[^\n]*", logos::skip)]
-    #[regex(r" ", logos::skip)]
+    #[regex(r"[ \t]", logos::skip)]
     #[display(fmt = "error")]
     Error,
 }
@@ -116,8 +125,8 @@ pub fn lexer<'input>(
         /* .inspect(|x| {
             dbg!(x);
         }) */
-        .map(|(token, span)| match token {
-            Token::Error => Err(LexerError(String::from("Unknown token"))),
+        .map(move |(token, span)| match token {
+            Token::Error => Err(LexerError(format!("Unknown token: {:?}", &input[span]))),
             v => Ok((span.start, v, span.end)),
         })
 }
