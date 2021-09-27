@@ -1,4 +1,4 @@
-use crate::{Type, Type::*};
+use crate::ast::{Type, Type::*};
 
 pub(crate) struct BuiltinFunction {
     pub name: &'static str,

@@ -1,6 +1,7 @@
 use crate::{
+    cow_ast::{self, RedirectionType, Statement, Type},
     type_checker::{TypeCheckerCtx, TypeError},
-    Builtin, RedirectionType, ShellContext, Statement, Type,
+    Builtin, ShellContext,
 };
 use gc::{Finalize, Gc, GcCell, Trace};
 use lasso::Spur;
@@ -218,7 +219,7 @@ pub struct RuntimeCtx<'input> {
 
 #[derive(Debug)]
 pub struct Overlay<'input> {
-    definitions: HashMap<Spur, super::Expression<'input>>,
+    definitions: HashMap<Spur, cow_ast::Expression<'input>>,
     values: HashMap<Spur, Value>,
     currently_evaluating: HashSet<Spur>,
 }
@@ -314,24 +315,34 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn enter_overlay(&mut self, definitions: Vec<super::VariableDefinition<'input>>) {
+    fn update_overlay(&mut self, definition: cow_ast::VariableDefinition<'input>) {
+        let ov = self
+            .overlays
+            .last_mut()
+            .expect("Should always have an overlay");
+        ov.currently_evaluating.remove(&definition.name);
+        ov.values.remove(&definition.name);
+        ov.definitions.insert(definition.name, definition.expr);
+    }
+
+    fn enter_overlay(&mut self, definitions: Vec<cow_ast::VariableDefinition<'input>>) {
         let overlay = Overlay {
             values: HashMap::new(),
             definitions: definitions
-                .iter()
-                .map(|def| (def.name, def.expr.clone()))
+                .into_iter()
+                .map(|def| (def.name, def.expr))
                 .collect(),
             currently_evaluating: HashSet::new(),
         };
         self.overlays.push(overlay);
     }
 
-    fn enter_single_overlay(&mut self, definition: super::VariableDefinition<'input>) {
+    fn enter_single_overlay(&mut self, definition: cow_ast::VariableDefinition<'input>) {
         let overlay = Overlay {
             values: HashMap::new(),
             definitions: {
                 let mut map = HashMap::new();
-                map.insert(definition.name, definition.expr.clone());
+                map.insert(definition.name, definition.expr);
                 map
             },
             currently_evaluating: HashSet::new(),
@@ -341,7 +352,7 @@ impl<'input> RuntimeCtx<'input> {
 
     pub(crate) fn prepare_cmd(
         &mut self,
-        command: &super::Command<'input>,
+        command: &cow_ast::Command<'input>,
     ) -> RuntimeResult<process::Command> {
         let name = self.eval_expr(&command.name)?.to_string();
         if &*name == "exit" {
@@ -397,7 +408,7 @@ impl<'input> RuntimeCtx<'input> {
 
     fn prepare_pipeline(
         &mut self,
-        pipeline: &super::Pipeline<'input>,
+        pipeline: &cow_ast::Pipeline<'input>,
     ) -> RuntimeResult<(Vec<process::Child>, process::Command)> {
         let mut prepared: Vec<_> = pipeline
             .commands
@@ -425,7 +436,7 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn run_pipeline(&mut self, pipeline: &super::Pipeline<'input>) -> RuntimeResult<ExitStatus> {
+    fn run_pipeline(&mut self, pipeline: &cow_ast::Pipeline<'input>) -> RuntimeResult<ExitStatus> {
         let (mut children, mut last) = self.prepare_pipeline(pipeline)?;
         let command = SharedChild::spawn(&mut last)?;
         *self.shell_ctx.current_process.write().unwrap() = Some(command);
@@ -446,19 +457,16 @@ impl<'input> RuntimeCtx<'input> {
         res
     }
 
-    fn run_chain_part(
-        &mut self,
-        chain_part: &super::ChainPart<'input>,
-    ) -> RuntimeResult<ExitStatus> {
+    fn run_chain_part(&mut self, chain_part: &cow_ast::ChainPart<'input>) -> RuntimeResult<ExitStatus> {
         match chain_part {
-            super::ChainPart::Pipeline(p) => self.run_pipeline(p),
-            super::ChainPart::Chain(c) => self.run_chain(c),
+            cow_ast::ChainPart::Pipeline(p) => self.run_pipeline(p),
+            cow_ast::ChainPart::Chain(c) => self.run_chain(c),
         }
     }
 
-    fn run_chain(&mut self, chain: &super::CommandChain<'input>) -> RuntimeResult<ExitStatus> {
+    fn run_chain(&mut self, chain: &cow_ast::CommandChain<'input>) -> RuntimeResult<ExitStatus> {
         match chain {
-            super::CommandChain::Or(c, rest) => {
+            cow_ast::CommandChain::Or(c, rest) => {
                 let result = self.run_chain_part(c)?;
                 if result.success() {
                     Ok(result)
@@ -466,7 +474,7 @@ impl<'input> RuntimeCtx<'input> {
                     self.run_chain(rest)
                 }
             }
-            super::CommandChain::And(c, rest) => {
+            cow_ast::CommandChain::And(c, rest) => {
                 let result = self.run_chain_part(c)?;
                 if result.success() {
                     self.run_chain(rest)
@@ -474,11 +482,22 @@ impl<'input> RuntimeCtx<'input> {
                     Ok(result)
                 }
             }
-            super::CommandChain::Pipeline(p) => self.run_pipeline(p),
+            cow_ast::CommandChain::Pipeline(p) => self.run_pipeline(p),
         }
     }
 
-    pub fn run_cmd_ctx(&mut self, cmd_ctx: super::CommandContext<'input>) -> RuntimeResult<()> {
+    pub fn run_cmd_stmt(&mut self, cmd_stmt: cow_ast::CommandStatement<'input>) -> RuntimeResult<()> {
+        match cmd_stmt {
+            cow_ast::CommandStatement::Definitions(defs) => {
+                defs.into_iter().for_each(|def| self.update_overlay(def))
+            }
+            cow_ast::CommandStatement::Commands(ctx) => self.run_cmd_ctx(ctx)?,
+        }
+
+        Ok(())
+    }
+
+    pub fn run_cmd_ctx(&mut self, cmd_ctx: cow_ast::CommandContext<'input>) -> RuntimeResult<()> {
         TypeCheckerCtx::new(self.shell_ctx)
             .check_cmd_ctx(&cmd_ctx)
             .map_err(|ty_errs| RuntimeError::Static(ty_errs))?;
@@ -496,19 +515,19 @@ impl<'input> RuntimeCtx<'input> {
 
     fn run_interpolation(
         &mut self,
-        fstring: &[super::StringPart<'input>],
+        fstring: &[cow_ast::StringPart<'input>],
     ) -> RuntimeResult<Rc<String>> {
         match fstring {
-            [super::StringPart::Text(v)] => Ok(Rc::from(v.to_string())),
-            [super::StringPart::Variable(v)] => self.resolve_text(*v),
-            [super::StringPart::Expression(e)] => Ok(self.eval_expr(e)?.to_string()),
+            [cow_ast::StringPart::Text(v)] => Ok(Rc::from(v.to_string())),
+            [cow_ast::StringPart::Variable(v)] => self.resolve_text(*v),
+            [cow_ast::StringPart::Expression(e)] => Ok(self.eval_expr(e)?.to_string()),
             _ => fstring
                 .iter()
                 .try_fold(String::new(), |mut current, segment| -> RuntimeResult<_> {
                     match segment {
-                        super::StringPart::Text(s) => current.push_str(s),
-                        super::StringPart::Variable(v) => current.push_str(&self.resolve_text(*v)?),
-                        super::StringPart::Expression(e) => {
+                        cow_ast::StringPart::Text(s) => current.push_str(s),
+                        cow_ast::StringPart::Variable(v) => current.push_str(&self.resolve_text(*v)?),
+                        cow_ast::StringPart::Expression(e) => {
                             current.push_str(&self.eval_expr(e)?.to_string())
                         }
                     }
@@ -605,9 +624,9 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn eval_expr(&mut self, expr: &super::Expression<'input>) -> RuntimeResult<Value> {
+    fn eval_expr(&mut self, expr: &cow_ast::Expression<'input>) -> RuntimeResult<Value> {
         match expr {
-            super::Expression::SubShell(code) => Ok(Value::Bytes(Rc::new(
+            cow_ast::Expression::SubShell(code) => Ok(Value::Bytes(Rc::new(
                 process::Command::new(std::env::current_exe()?)
                     .arg("builtin")
                     .arg("run-ast")
@@ -616,16 +635,16 @@ impl<'input> RuntimeCtx<'input> {
                     .output()?
                     .stdout,
             ))),
-            super::Expression::Value(v) => match v {
-                super::Value::String(s) => Ok(Value::Str(Rc::from(s.to_string()))),
-                super::Value::Int(i) => Ok(Value::Int(*i)),
-                super::Value::List(l) => Ok(Value::List(Gc::new(
+            cow_ast::Expression::Value(v) => match v {
+                cow_ast::Value::String(s) => Ok(Value::Str(Rc::from(s.to_string()))),
+                cow_ast::Value::Int(i) => Ok(Value::Int(*i)),
+                cow_ast::Value::List(l) => Ok(Value::List(Gc::new(
                     l.iter()
                         .map(|expr| -> RuntimeResult<_> { Ok(GcCell::new(self.eval_expr(expr)?)) })
                         .collect::<RuntimeResult<_>>()?,
                 ))),
             },
-            super::Expression::Call { function, args } => {
+            cow_ast::Expression::Call { function, args } => {
                 let function = self.eval_expr(function)?;
                 let args: Vec<_> = args
                     .iter()
@@ -633,7 +652,7 @@ impl<'input> RuntimeCtx<'input> {
                     .collect::<RuntimeResult<_>>()?;
                 self.call_function(&function, args)
             }
-            super::Expression::Method { value, name, args } => {
+            cow_ast::Expression::Method { value, name, args } => {
                 let args = std::iter::once(&**value)
                     .chain(args.iter())
                     .map(|arg| self.eval_expr(arg))
@@ -649,8 +668,8 @@ impl<'input> RuntimeCtx<'input> {
                     Some(function) => self.call_function(&function, args),
                 }
             }
-            super::Expression::Interpolated(i) => self.run_interpolation(i).map(Value::Str),
-            super::Expression::Variable(v) => self.resolve(*v)?.map(Ok).unwrap_or_else(|| {
+            cow_ast::Expression::Interpolated(i) => self.run_interpolation(i).map(Value::Str),
+            cow_ast::Expression::Variable(v) => self.resolve(*v)?.map(Ok).unwrap_or_else(|| {
                 Err(RuntimeError::Undefined(
                     self.shell_ctx
                         .rodeo
@@ -667,9 +686,12 @@ impl<'input> RuntimeCtx<'input> {
             Statement::VarDef(v) => {
                 self.enter_single_overlay(v);
             }
-            Statement::Cmd(cmds) => {
-                for cmd in cmds {
-                    self.run_cmd_ctx(cmd)?;
+            Statement::Cmd {
+                blk,
+                capture: _capture,
+            } => {
+                for cmd in blk {
+                    self.run_cmd_stmt(cmd)?;
                 }
             }
         }

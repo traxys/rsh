@@ -1,19 +1,22 @@
 grammar<'input>(ctx: &mut ShellContext, input: &'input str);
 use crate::{
-	lexer::{self, LexerError},
-	Command,
-	CommandChain,
-	Pipeline,
-	ChainPart,
-	VariableDefinition,
-	CommandContext,
-	StringPart,
-	RedirectionType,
-	Type,
-	Value,
-	Expression,
 	ShellContext,
-	Statement,
+	lexer::{self, LexerError},
+	ast::{
+		Command,
+		CommandChain,
+		Pipeline,
+		ChainPart,
+		VariableDefinition,
+		CommandContext,
+		StringPart,
+		RedirectionType,
+		Type,
+		Value,
+		Expression,
+		Statement,
+		CommandStatement,
+	}
 };
 use lasso::Spur;
 
@@ -46,6 +49,7 @@ extern {
 		"{" => lexer::Token::LBrace,
 		"}" => lexer::Token::RBrace,
 		"cmd" => lexer::Token::Cmd,
+		"capture" => lexer::Token::Capture,
 		"=>" => lexer::Token::Arrow,
 		id => lexer::Token::Identifier(<&'input str>),
 		word => lexer::Token::Word(<&'input str>),
@@ -171,27 +175,42 @@ VariableDefinition: VariableDefinition<'input> = {
 
 pub CommandContext: CommandContext<'input> = {
 	"let" <mut variables:(<VariableDefinition> ",")*> <trailing:VariableDefinition?> "in" <commands:CommandList> => {
-		CommandContext{
-			commands,
-			variables: match trailing {
-				None => variables,
-				Some(v) => {variables.push(v); variables}
+			CommandContext{
+				commands,
+				variables: match trailing {
+					None => variables,
+					Some(v) => {variables.push(v); variables}
+				}
 			}
-		}
 	},
 	<commands:CommandList> => CommandContext{commands, variables: Vec::new()},
-};
+}
 
-CmdBlock: Vec<CommandContext<'input>> = {
-	<mut cmds:(<CommandContext> "\n")*> <trl:CommandContext> <_last_newline:"\n"?> => {
+pub CommandStatement: CommandStatement<'input> = {
+	"let" <mut variables:(<VariableDefinition> ",")*> <trailing:VariableDefinition> => {
+		CommandStatement::Definitions({
+			variables.push(trailing); 
+			variables
+		})
+	},
+	<CommandContext> => CommandStatement::Commands(<>),
+}
+
+CmdBlockContent: Vec<CommandStatement<'input>> = {
+	<mut cmds:(<CommandStatement> "\n")*> <trl:CommandStatement> <_last_newline:"\n"?> => {
 		cmds.push(trl);
 		cmds
 	}
 };
 
+CmdBlk: Vec<CommandStatement<'input>> = {
+	"cmd" "{" <_nl:"\n"?> <cmds:CmdBlockContent> "}" => cmds,
+}
+
 Statement: Statement<'input> = {
 	"let" <VariableDefinition> ";" => Statement::VarDef(<>),
-	"cmd" "{" <_nl:"\n"?> <cmds:CmdBlock> "}" => Statement::Cmd(cmds),
+	<CmdBlk> => Statement::Cmd{blk: <>, capture: false},
+	"capture" <blk:CmdBlk> => Statement::Cmd{blk, capture: true},
 };
 
 StatementLine: Statement<'input> = {
@@ -200,4 +219,4 @@ StatementLine: Statement<'input> = {
 
 pub Script: Vec<Statement<'input>> = {
 	<_nl:"\n"*> <s:StatementLine*> => s,
-};
+}

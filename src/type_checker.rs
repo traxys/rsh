@@ -1,4 +1,7 @@
-use crate::{ShellContext, Type, TypeCheck, VariableDefinition};
+use crate::{
+    cow_ast::{self, Type, TypeCheck, VariableDefinition},
+    ShellContext,
+};
 use lasso::Spur;
 use std::collections::HashMap;
 
@@ -98,7 +101,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         })
     }
 
-    pub fn check_cmd_ctx(&mut self, cmd_ctx: &super::CommandContext<'_>) -> TypeCheckResult {
+    pub fn check_cmd_ctx(&mut self, cmd_ctx: &cow_ast::CommandContext<'_>) -> TypeCheckResult {
         self.enter_overlay(&cmd_ctx.variables);
 
         merge_unit(
@@ -126,27 +129,27 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         }
     }
 
-    fn check_chain(&mut self, chain: &super::CommandChain) -> TypeCheckResult {
+    fn check_chain(&mut self, chain: &cow_ast::CommandChain) -> TypeCheckResult {
         match chain {
-            crate::CommandChain::Or(c, rest) | crate::CommandChain::And(c, rest) => {
+            cow_ast::CommandChain::Or(c, rest) | cow_ast::CommandChain::And(c, rest) => {
                 merge_unit(self.check_chain_part(c), self.check_chain(rest))
             }
-            crate::CommandChain::Pipeline(p) => self.check_pipeline(p),
+            cow_ast::CommandChain::Pipeline(p) => self.check_pipeline(p),
         }
     }
 
-    fn check_chain_part(&mut self, chain_part: &super::ChainPart) -> TypeCheckResult {
+    fn check_chain_part(&mut self, chain_part: &cow_ast::ChainPart) -> TypeCheckResult {
         match chain_part {
-            crate::ChainPart::Pipeline(p) => self.check_pipeline(p),
-            crate::ChainPart::Chain(c) => self.check_chain(c),
+            cow_ast::ChainPart::Pipeline(p) => self.check_pipeline(p),
+            cow_ast::ChainPart::Chain(c) => self.check_chain(c),
         }
     }
 
-    fn check_pipeline(&mut self, pipeline: &super::Pipeline) -> TypeCheckResult {
+    fn check_pipeline(&mut self, pipeline: &cow_ast::Pipeline) -> TypeCheckResult {
         fold_unit(pipeline.commands.iter(), |cmd| self.check_command(cmd))
     }
 
-    fn check_command(&mut self, cmd: &super::Command) -> TypeCheckResult {
+    fn check_command(&mut self, cmd: &cow_ast::Command) -> TypeCheckResult {
         merge_unit(
             self.check_expression(&cmd.name).map(|_| ()),
             merge_unit(
@@ -160,10 +163,10 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         )
     }
 
-    fn check_expression(&mut self, expr: &super::Expression) -> TypeCheckResult<Type> {
+    fn check_expression(&mut self, expr: &cow_ast::Expression) -> TypeCheckResult<Type> {
         match expr {
-            crate::Expression::Value(v) => Ok(v.ty()),
-            crate::Expression::Method { value, name, args } => {
+            cow_ast::Expression::Value(v) => Ok(v.ty()),
+            cow_ast::Expression::Method { value, name, args } => {
                 let (value_ty, args_ty) = merge_errors(
                     self.check_expression(value),
                     fold_errors(args.iter(), |expr| self.check_expression(expr)),
@@ -201,7 +204,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
 
                 Ok(ret_ty)
             }
-            crate::Expression::Call { function, args } => {
+            cow_ast::Expression::Call { function, args } => {
                 let (func_ty, args_ty) = merge_errors(
                     self.check_expression(function),
                     fold_errors(args.iter(), |expr| self.check_expression(expr)),
@@ -224,15 +227,15 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
 
                 Ok(*ret_ty)
             }
-            crate::Expression::Interpolated(i) => {
+            cow_ast::Expression::Interpolated(i) => {
                 self.check_interpolated(i)?;
                 Ok(Type::String)
             }
-            crate::Expression::SubShell(subshell) => {
+            cow_ast::Expression::SubShell(subshell) => {
                 self.check_cmd_ctx(subshell)?;
                 Ok(Type::Bytes)
             }
-            crate::Expression::Variable(v) => {
+            cow_ast::Expression::Variable(v) => {
                 self.resolve(*v).cloned().map(Ok).unwrap_or_else(|| {
                     Err(vec![TypeError::Undefined(
                         self.shell_ctx
@@ -246,10 +249,10 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         }
     }
 
-    fn check_interpolated(&mut self, parts: &[super::StringPart]) -> TypeCheckResult {
+    fn check_interpolated(&mut self, parts: &[cow_ast::StringPart]) -> TypeCheckResult {
         fold_unit(
             parts.iter().filter_map(|part| match part {
-                crate::StringPart::Expression(e) => Some(e),
+                cow_ast::StringPart::Expression(e) => Some(e),
                 _ => None,
             }),
             |expr| self.check_expression(expr).map(|_| ()),

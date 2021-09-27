@@ -6,7 +6,7 @@ pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;
 #[error("lexer error: {0}")]
 pub struct LexerError(pub String);
 
-#[derive(Debug, Clone, Copy, Logos, derive_more::Display, PartialEq)]
+#[derive(Debug, Clone, Logos, derive_more::Display, PartialEq)]
 pub enum Token<'input> {
     #[token("let", priority = 100)]
     #[display(fmt = "let")]
@@ -14,6 +14,9 @@ pub enum Token<'input> {
     #[token("cmd", priority = 100)]
     #[display(fmt = "cmd")]
     Cmd,
+    #[token("capture", priority = 100)]
+    #[display(fmt = "capture")]
+    Capture,
     #[token("in", priority = 100)]
     #[display(fmt = "in")]
     In,
@@ -75,14 +78,12 @@ pub enum Token<'input> {
     #[display(fmt = "$(")]
     SubShell,
     #[regex(r#"'(\\[^\n]|[^'\n])*'"#, |lex| {
-        let slice = lex.slice();
-        &slice[1..lex.slice().len() - 1]
+        lex.slice()
     })]
     #[display(fmt = "string({})", _0)]
     StrLitteral(&'input str),
     #[regex(r#""(\\[^\n]|[^"\n])*""#, |lex| {
-        let slice = lex.slice();
-        &slice[1..lex.slice().len() - 1]
+        lex.slice()
     })]
     #[display(fmt = "istring({})", _0)]
     InterpolatedString(&'input str),
