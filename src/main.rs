@@ -103,9 +103,8 @@ fn interactive_loop<E: rustyline::Helper>(
 ) -> color_eyre::Result<i32> {
     let command_parser = rsh::CommandParser::new();
 
+    let mut rt_ctx = runtime::RuntimeCtx::new(sh_ctx);
     loop {
-        let mut rt_ctx = runtime::RuntimeCtx::new(sh_ctx);
-
         let prompt = prompt_command
             .map(|command| -> color_eyre::Result<_> {
                 let command = &command;
@@ -120,25 +119,20 @@ fn interactive_loop<E: rustyline::Helper>(
             })
             .unwrap_or_else(|| Ok(String::from(">> ")))?;
 
-        drop(rt_ctx);
-
         let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
-                let mut rt_ctx = runtime::RuntimeCtx::new(sh_ctx);
                 let line = &line;
-                let parsed = match rsh::CommandStatementParser::new().parse(
-                    rt_ctx.shell_ctx,
-                    line,
-                    lexer::lexer(&line),
-                ) {
+                let parsed: cow_ast::CommandStatement = match rsh::CommandStatementParser::new()
+                    .parse(rt_ctx.shell_ctx, line, lexer::lexer(&line))
+                {
                     Err(e) => {
                         println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
                         continue;
                     }
                     Ok(v) => v.into(),
                 };
-                match rt_ctx.run_cmd_stmt(parsed) {
+                match rt_ctx.run_cmd_stmt(parsed.owned()) {
                     Err(RuntimeError::Exit(v)) => return Ok(v),
                     Err(e) => println!("  Runtime Error: {}", yansi::Paint::red(e)),
                     Ok(_) => (),
