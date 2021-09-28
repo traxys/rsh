@@ -18,6 +18,7 @@ use crate::runtime::RuntimeError;
 pub mod ast;
 mod builtin_functions;
 pub mod cow_ast;
+mod editor;
 pub mod lexer;
 pub mod runtime;
 pub mod type_checker;
@@ -79,13 +80,14 @@ fn interactive_input(
     sh_ctx: &mut ShellContext,
     prompt_command: Option<&str>,
 ) -> color_eyre::Result<i32> {
-    let mut rl: Editor<()> = Editor::with_config(
+    let mut rl: Editor<editor::Editor> = Editor::with_config(
         rustyline::Config::builder()
             .auto_add_history(true)
             .history_ignore_space(true)
             .tab_stop(4)
             .build(),
     );
+    rl.set_helper(Some(editor::Editor::new()));
     match rl.load_history("/home/traxys/.rsh-history") {
         Ok(_) => (),
         Err(ReadlineError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (),
