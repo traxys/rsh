@@ -356,37 +356,76 @@ impl Styling {
         self.current.push(StylingChoice { range, style, prio });
     }
 
-    fn find_style(&self, idx: usize) -> Option<(usize, &ansi_term::Style)> {
-        let (idx, choice) = self
-            .current
-            .iter()
-            .enumerate()
-            .filter(|(_, choice)| choice.range.contains(&idx))
-            .max_by(|(_, c1), (_, c2)| c1.prio.cmp(&c2.prio))?;
-        Some((idx, &choice.style))
-    }
-
     fn resolve_ranges(&self, len: usize) -> Vec<(Range<usize>, &ansi_term::Style)> {
-        if len > 0 {
-            let mut ranges = Vec::new();
+        struct StyleList<'a> {
+            backing: Vec<(usize, &'a ansi_term::Style, usize)>,
+        }
 
-            let mut current_range = (0, 1);
-            let mut current_style = self.find_style(0).unwrap();
-
-            for i in 1..len {
-                let (idx, style) = self.find_style(i).unwrap();
-                if idx != current_style.0 {
-                    ranges.push((current_range.0..current_range.1, current_style.1));
-                    current_style = (idx, style);
-                    current_range.0 = i;
-                }
-                current_range.1 += 1;
+        impl<'a> StyleList<'a> {
+            fn new<I>(i: I) -> Self
+            where
+                I: IntoIterator<Item = (usize, &'a ansi_term::Style, usize)>,
+            {
+                let mut backing: Vec<_> = i.into_iter().collect();
+                backing.sort_by(|a, b| b.2.cmp(&a.2));
+                Self { backing }
             }
 
-            ranges.push((current_range.0..current_range.1, current_style.1));
+            fn remove(&mut self, idx: usize) {
+                let i = self
+                    .backing
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.0 == idx)
+                    .unwrap()
+                    .0;
+                self.backing.remove(i);
+            }
+
+            fn insert(&mut self, idx: usize, style: &'a ansi_term::Style, prio: usize) {
+                self.backing.push((idx, style, prio));
+                self.backing.sort_by(|a, b| b.2.cmp(&a.2));
+            }
+
+            fn current(&self) -> &'a ansi_term::Style {
+                &self.backing[0].1
+            }
+        }
+
+        if len > 0 {
+            let mut start = HashMap::new();
+            let mut end = HashMap::new();
+
+            for (i, r) in self.current.iter().enumerate() {
+                start
+                    .entry(r.range.start)
+                    .or_insert_with(Vec::new)
+                    .push((i, &r.style, r.prio));
+                end.entry(r.range.end).or_insert_with(Vec::new).push(i);
+            }
+
+            let mut ranges = Vec::new();
+            let mut rstart = 0;
+
+            let mut styles = StyleList::new(start.get(&0).unwrap().iter().copied());
+            for i in 1..len {
+                if let Some(ends) = end.get(&i) {
+                    ranges.push((rstart..i, styles.current()));
+                    for idx in ends {
+                        styles.remove(*idx);
+                    }
+                    rstart = i;
+                }
+                if let Some(starts) = start.get(&i) {
+                    for (idx, style, prio) in starts {
+                        styles.insert(*idx, style, *prio);
+                    }
+                }
+            }
+            ranges.push((rstart..len, styles.current()));
             ranges
         } else {
-            return Vec::new();
+            Vec::new()
         }
     }
 
