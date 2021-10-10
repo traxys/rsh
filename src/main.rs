@@ -23,9 +23,6 @@ pub mod lexer;
 pub mod runtime;
 pub mod type_checker;
 
-type ParseError<'input, T> =
-    Result<T, lalrpop_util::ParseError<usize, lexer::Token<'input>, lexer::LexerError>>;
-
 lalrpop_mod!(pub rsh);
 
 type ShResult<T, E = Error> = std::result::Result<T, E>;
@@ -110,10 +107,14 @@ fn interactive_loop<E: rustyline::Helper>(
         let prompt = prompt_command
             .map(|command| -> color_eyre::Result<_> {
                 let command = &command;
-                let parsed = command_parser
-                    .parse(rt_ctx.shell_ctx, command, lexer::lexer(&command))
-                    .map_err(|err| color_eyre::eyre::eyre!("could not parse prompt: {}", err))?
-                    .into();
+                let parsed = cow_ast::Command::from_ast(
+                    command_parser
+                        .parse(rt_ctx.shell_ctx, command, lexer::lexer(&command))
+                        .map_err(|err| {
+                            color_eyre::eyre::eyre!("could not parse prompt: {}", err)
+                        })?,
+                    rt_ctx.shell_ctx,
+                )?;
                 let mut cmd = rt_ctx.prepare_cmd(&parsed)?;
                 cmd.output()
                     .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
@@ -132,7 +133,7 @@ fn interactive_loop<E: rustyline::Helper>(
                         println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
                         continue;
                     }
-                    Ok(v) => v.into(),
+                    Ok(v) => cow_ast::CommandStatement::from_ast(v, rt_ctx.shell_ctx)?,
                 };
                 match rt_ctx.run_cmd_stmt(parsed.owned(), None) {
                     Err(RuntimeError::Exit(v)) => return Ok(v),
@@ -282,7 +283,8 @@ fn main() -> color_eyre::Result<()> {
             report!(rsh::ScriptParser::new().parse(&mut shell_ctx, script, lexer::lexer(&script)));
         let mut rt_ctx = RuntimeCtx::new(&mut shell_ctx);
         for stmt in parsed {
-            match rt_ctx.run_statement(stmt.into()) {
+            let stmt = cow_ast::Statement::from_ast(stmt, rt_ctx.shell_ctx)?;
+            match rt_ctx.run_statement(stmt) {
                 Ok(_) => (),
                 Err(RuntimeError::Exit(i)) => process::exit(i),
                 Err(e) => {

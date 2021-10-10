@@ -1,4 +1,7 @@
+use crate::{lexer, rsh, ShellContext};
 use lasso::Spur;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -14,16 +17,6 @@ pub enum StringPart<'input> {
     Expression(Expression<'input>),
 }
 
-impl<'a> From<ast::StringPart<'a>> for StringPart<'a> {
-    fn from(v: ast::StringPart<'a>) -> Self {
-        match v {
-            ast::StringPart::Text(t) => Self::Text(CowStr::Borrowed(t)),
-            ast::StringPart::Variable(v) => Self::Variable(v),
-            ast::StringPart::Expression(e) => Self::Expression(e.into()),
-        }
-    }
-}
-
 fn cow_to_owned(cow: CowStr<'_>) -> CowStr<'static> {
     match cow {
         Cow::Borrowed(b) => Cow::Owned(b.to_owned()),
@@ -31,9 +24,62 @@ fn cow_to_owned(cow: CowStr<'_>) -> CowStr<'static> {
     }
 }
 
+// TODO: better errors
+#[derive(Debug, thiserror::Error)]
+#[error("parse error during interpolation")]
+pub struct InterpolationError;
+
+pub type AstResult<T> = Result<T, InterpolationError>;
+
+static INTERPOLATION_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+|\$\{[^{}]*\}").unwrap());
+
+impl<'input> StringPart<'input> {
+    pub fn interpolate(s: Cow<'input, str>, ctx: &mut ShellContext) -> AstResult<Vec<Self>> {
+        match s {
+            Cow::Borrowed(b) => StringPart::interpolate_borrowed(b, ctx),
+            Cow::Owned(_) => todo!(),
+        }
+    }
+
+    fn interpolate_borrowed(s: &'input str, ctx: &mut ShellContext) -> AstResult<Vec<Self>> {
+        let mut idx = 0;
+        let mut interpolation = Vec::new();
+
+        for mtch in INTERPOLATION_REGEX.find_iter(&s) {
+            if mtch.start() != idx {
+                interpolation.push(Self::Text(Cow::Borrowed(&s[idx..mtch.start()])));
+            }
+            idx = mtch.end();
+            let match_expr = &mtch.as_str()[1..];
+            if match_expr.starts_with("{") {
+                let input = match_expr.trim_start_matches('{').trim_end_matches('}');
+                let expr = rsh::StrongExpressionParser::new()
+                    .parse(ctx, input, lexer::lexer(&input))
+                    .map_err(|_| InterpolationError)?;
+                interpolation.push(Self::Expression(Expression::from_ast(expr, ctx)?));
+            } else {
+                interpolation.push(Self::Variable(ctx.rodeo.get_or_intern(&mtch.as_str()[1..])));
+            }
+        }
+        if idx < s.len() {
+            interpolation.push(Self::Text(Cow::Borrowed(&s[idx..])))
+        }
+
+        Ok(interpolation)
+    }
+}
+
 fn convert_vec<I, O, F>(i: Vec<I>, f: F) -> Vec<O>
 where
     F: Fn(I) -> O,
+{
+    i.into_iter().map(f).collect()
+}
+
+fn try_convert_vec<I, O, F>(i: Vec<I>, f: F) -> AstResult<Vec<O>>
+where
+    F: FnMut(I) -> AstResult<O>,
 {
     i.into_iter().map(f).collect()
 }
@@ -68,19 +114,15 @@ impl<'a> Command<'a> {
             redirections: convert_vec(self.redirections, |(v, e)| (v, e.owned())),
         }
     }
-}
 
-impl<'a> From<ast::Command<'a>> for Command<'a> {
-    fn from(v: ast::Command<'a>) -> Self {
-        Self {
-            name: v.name.into(),
-            args: v.args.into_iter().map(From::from).collect(),
-            redirections: v
-                .redirections
-                .into_iter()
-                .map(|(v, e)| (v, e.into()))
-                .collect(),
-        }
+    pub fn from_ast(v: ast::Command<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
+        Ok(Self {
+            name: Expression::from_ast(v.name, sh_ctx)?,
+            args: try_convert_vec(v.args, |e| Expression::from_ast(e, sh_ctx))?,
+            redirections: try_convert_vec(v.redirections, |(v, e)| {
+                Ok((v, Expression::from_ast(e, sh_ctx)?))
+            })?,
+        })
     }
 }
 
@@ -96,13 +138,11 @@ impl<'a> Pipeline<'a> {
             commands: convert_vec(self.commands, |e| e.owned()),
         }
     }
-}
 
-impl<'a> From<ast::Pipeline<'a>> for Pipeline<'a> {
-    fn from(v: ast::Pipeline<'a>) -> Self {
-        Self {
-            commands: v.commands.into_iter().map(From::from).collect(),
-        }
+    pub fn from_ast(v: ast::Pipeline<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
+        Ok(Self {
+            commands: try_convert_vec(v.commands, |c| Command::from_ast(c, sh_ctx))?,
+        })
     }
 }
 
@@ -148,14 +188,16 @@ impl<'a> CommandChain<'a> {
             CommandChain::Pipeline(p) => CommandChain::Pipeline(p.owned()),
         }
     }
-}
 
-impl<'a> From<ast::CommandChain<'a>> for CommandChain<'a> {
-    fn from(v: ast::CommandChain<'a>) -> Self {
+    pub fn from_ast(v: ast::CommandChain<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
         match v {
-            ast::CommandChain::Or(a, b) => Self::Or(a.into(), Box::new((*b).into())),
-            ast::CommandChain::And(a, b) => Self::And(a.into(), Box::new((*b).into())),
-            ast::CommandChain::Pipeline(p) => Self::Pipeline(p.into()),
+            ast::CommandChain::Or(a, b) => {
+                Ok(Self::Or(a.into(), Box::new(Self::from_ast(*b, sh_ctx)?)))
+            }
+            ast::CommandChain::And(a, b) => {
+                Ok(Self::And(a.into(), Box::new(Self::from_ast(*b, sh_ctx)?)))
+            }
+            ast::CommandChain::Pipeline(p) => Ok(Self::Pipeline(Pipeline::from_ast(p, sh_ctx)?)),
         }
     }
 }
@@ -180,15 +222,13 @@ impl<'a> VariableDefinition<'a> {
             expr: self.expr.owned(),
         }
     }
-}
 
-impl<'a> From<ast::VariableDefinition<'a>> for VariableDefinition<'a> {
-    fn from(v: ast::VariableDefinition<'a>) -> Self {
-        Self {
+    pub fn from_ast(v: ast::VariableDefinition<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
+        Ok(Self {
             name: v.name,
-            expr: v.expr.into(),
+            expr: Expression::from_ast(v.expr, sh_ctx)?,
             ty: v.ty,
-        }
+        })
     }
 }
 
@@ -207,14 +247,12 @@ impl<'a> CommandContext<'a> {
             variables: convert_vec(self.variables, |v| v.owned()),
         }
     }
-}
 
-impl<'a> From<ast::CommandContext<'a>> for CommandContext<'a> {
-    fn from(v: ast::CommandContext<'a>) -> Self {
-        Self {
-            commands: v.commands.into_iter().map(From::from).collect(),
-            variables: v.variables.into_iter().map(From::from).collect(),
-        }
+    pub fn from_ast(v: ast::CommandContext<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
+        Ok(Self {
+            commands: try_convert_vec(v.commands, |c| CommandChain::from_ast(c, sh_ctx))?,
+            variables: try_convert_vec(v.variables, |v| VariableDefinition::from_ast(v, sh_ctx))?,
+        })
     }
 }
 
@@ -235,15 +273,17 @@ impl<'a> CommandStatement<'a> {
             CommandStatement::Commands(c) => CommandStatement::Commands(c.owned()),
         }
     }
-}
 
-impl<'a> From<ast::CommandStatement<'a>> for CommandStatement<'a> {
-    fn from(v: ast::CommandStatement<'a>) -> Self {
+    pub fn from_ast(v: ast::CommandStatement<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
         match v {
             ast::CommandStatement::Definitions(v) => {
-                Self::Definitions(v.into_iter().map(Into::into).collect())
+                Ok(Self::Definitions(try_convert_vec(v, |d| {
+                    VariableDefinition::from_ast(d, sh_ctx)
+                })?))
             }
-            ast::CommandStatement::Commands(c) => Self::Commands(c.into()),
+            ast::CommandStatement::Commands(c) => {
+                Ok(Self::Commands(CommandContext::from_ast(c, sh_ctx)?))
+            }
         }
     }
 }
@@ -272,17 +312,15 @@ impl<'a> Statement<'a> {
             Statement::Expr(e) => Statement::Expr(e.owned()),
         }
     }
-}
 
-impl<'a> From<ast::Statement<'a>> for Statement<'a> {
-    fn from(v: ast::Statement<'a>) -> Self {
+    pub fn from_ast(v: ast::Statement<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
         match v {
-            ast::Statement::VarDef(v) => Self::VarDef(v.into()),
-            ast::Statement::Cmd { blk, capture } => Self::Cmd {
-                blk: blk.into_iter().map(Into::into).collect(),
+            ast::Statement::VarDef(v) => Ok(Self::VarDef(VariableDefinition::from_ast(v, sh_ctx)?)),
+            ast::Statement::Cmd { blk, capture } => Ok(Self::Cmd {
+                blk: try_convert_vec(blk, |b| CommandStatement::from_ast(b, sh_ctx))?,
                 capture,
-            },
-            ast::Statement::Expr(e) => Self::Expr(e.into()),
+            }),
+            ast::Statement::Expr(e) => Ok(Self::Expr(Expression::from_ast(e, sh_ctx)?)),
         }
     }
 }
@@ -293,16 +331,6 @@ pub enum Value<'input> {
     String(CowStr<'input>),
     Int(i64),
     List(Vec<Expression<'input>>),
-}
-
-impl<'a> From<ast::Value<'a>> for Value<'a> {
-    fn from(v: ast::Value<'a>) -> Self {
-        match v {
-            ast::Value::String(s) => Self::String(CowStr::Borrowed(s)),
-            ast::Value::Int(i) => Self::Int(i),
-            ast::Value::List(l) => Self::List(l.into_iter().map(Into::into).collect()),
-        }
-    }
 }
 
 impl<'input> Value<'input> {
@@ -319,6 +347,16 @@ impl<'input> Value<'input> {
             Value::String(s) => Value::String(cow_to_owned(s)),
             Value::Int(i) => Value::Int(i),
             Value::List(l) => Value::List(convert_vec(l, |e| e.owned())),
+        }
+    }
+
+    pub fn from_ast(v: ast::Value<'input>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
+        match v {
+            ast::Value::String(s) => Ok(Self::String(s)),
+            ast::Value::Int(i) => Ok(Self::Int(i)),
+            ast::Value::List(l) => Ok(Self::List(try_convert_vec(l, |v| {
+                Expression::from_ast(v, sh_ctx)
+            })?)),
         }
     }
 }
@@ -361,24 +399,26 @@ impl<'a> Expression<'a> {
     }
 }
 
-impl<'a> From<ast::Expression<'a>> for Expression<'a> {
-    fn from(v: ast::Expression<'a>) -> Self {
+impl<'a> Expression<'a> {
+    pub fn from_ast(v: ast::Expression<'a>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
         match v {
-            ast::Expression::Value(v) => Self::Value(v.into()),
-            ast::Expression::Call { function, args } => Self::Call {
-                function: Box::new((*function).into()),
-                args: args.into_iter().map(Into::into).collect(),
-            },
-            ast::Expression::Method { value, name, args } => Self::Method {
-                value: Box::new((*value).into()),
+            ast::Expression::Value(v) => Ok(Self::Value(Value::from_ast(v, sh_ctx)?)),
+            ast::Expression::Call { function, args } => Ok(Self::Call {
+                function: Box::new(Expression::from_ast(*function, sh_ctx)?),
+                args: try_convert_vec(args, |e| Expression::from_ast(e, sh_ctx))?,
+            }),
+            ast::Expression::Method { value, name, args } => Ok(Self::Method {
+                value: Box::new(Expression::from_ast(*value, sh_ctx)?),
                 name,
-                args: args.into_iter().map(Into::into).collect(),
-            },
+                args: try_convert_vec(args, |e| Expression::from_ast(e, sh_ctx))?,
+            }),
             ast::Expression::Interpolated(p) => {
-                Self::Interpolated(p.into_iter().map(Into::into).collect())
+                Ok(Self::Interpolated(StringPart::interpolate(p, sh_ctx)?))
             }
-            ast::Expression::SubShell(c) => Self::SubShell(Box::new((*c).into())),
-            ast::Expression::Variable(v) => Self::Variable(v),
+            ast::Expression::SubShell(c) => Ok(Self::SubShell(Box::new(CommandContext::from_ast(
+                *c, sh_ctx,
+            )?))),
+            ast::Expression::Variable(v) => Ok(Self::Variable(v)),
         }
     }
 }

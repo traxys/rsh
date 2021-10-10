@@ -1,47 +1,6 @@
-use crate::{lexer, rsh, ParseError, ShellContext};
 use lasso::Spur;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-
-static INTERPOLATION_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+|\$\{[^{}]*\}").unwrap());
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum StringPart<'input> {
-    #[serde(borrow)]
-    Text(&'input str),
-    Variable(Spur),
-    Expression(Expression<'input>),
-}
-
-impl<'input> StringPart<'input> {
-    pub fn interpolate(s: &'input str, ctx: &mut ShellContext) -> ParseError<'input, Vec<Self>> {
-        let mut idx = 0;
-        let mut interpolation = Vec::new();
-
-        for mtch in INTERPOLATION_REGEX.find_iter(&s) {
-            if mtch.start() != idx {
-                interpolation.push(Self::Text(&s[idx..mtch.start()]));
-            }
-            idx = mtch.end();
-            let match_expr = &mtch.as_str()[1..];
-            if match_expr.starts_with("{") {
-                let input = match_expr.trim_start_matches('{').trim_end_matches('}');
-                let expr =
-                    rsh::StrongExpressionParser::new().parse(ctx, input, lexer::lexer(&input))?;
-                interpolation.push(Self::Expression(expr));
-            } else {
-                interpolation.push(Self::Variable(ctx.rodeo.get_or_intern(&mtch.as_str()[1..])));
-            }
-        }
-        if idx < s.len() {
-            interpolation.push(Self::Text(&s[idx..]))
-        }
-
-        Ok(interpolation)
-    }
-}
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum RedirectionType {
@@ -184,7 +143,7 @@ pub enum Statement<'input> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Value<'input> {
     #[serde(borrow)]
-    String(&'input str),
+    String(Cow<'input, str>),
     Int(i64),
     List(Vec<Expression<'input>>),
 }
@@ -212,7 +171,7 @@ pub enum Expression<'input> {
         name: Spur,
         args: Vec<Expression<'input>>,
     },
-    Interpolated(Vec<StringPart<'input>>),
+    Interpolated(Cow<'input, str>),
     SubShell(Box<CommandContext<'input>>),
     Variable(Spur),
 }

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use logos::Logos;
 
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;
@@ -78,16 +80,17 @@ pub enum Token<'input> {
     #[display(fmt = "$(")]
     SubShell,
     #[regex(r#"'(\\[^\n]|[^'\n])*'"#, |lex| {
-        lex.slice()
+        let s = lex.slice();
+        escape_string(&s[1..s.len() - 1])
     })]
     #[display(fmt = "string({})", _0)]
-    StrLitteral(&'input str),
+    StrLitteral(Cow<'input, str>),
     #[regex(r#""(\\[^\n]|[^"\n])*""#, |lex| {
         let s = lex.slice();
-        &s[1..s.len() - 1]
+        escape_string(&s[1..s.len() - 1])
     })]
     #[display(fmt = "istring({})", _0)]
-    InterpolatedString(&'input str),
+    InterpolatedString(Cow<'input, str>),
     #[regex(r"[0-9_]+", priority = 30, callback = |lex| {
         lex
             .slice()
@@ -117,6 +120,33 @@ pub enum Token<'input> {
     #[regex(r"[ \t]", logos::skip)]
     #[display(fmt = "error")]
     Error,
+}
+
+fn escape_string(input: &str) -> Cow<'_, str> {
+    if !input.contains("\\") {
+        Cow::Borrowed(input)
+    } else {
+        let mut val = Vec::new();
+        let mut escape = false;
+        for x in input.bytes() {
+            if x == b'\\' {
+                escape = true;
+            } else if escape {
+                match x {
+                    b't' => val.push(b'\t'),
+                    b'n' => val.push(b'\n'),
+                    _ => {
+                        val.push(b'\\');
+                        val.push(x);
+                    }
+                }
+                escape = false;
+            } else {
+                val.push(x);
+            }
+        }
+        Cow::Owned(String::from_utf8(val).expect("should not produce garbage"))
+    }
 }
 
 pub fn lexer<'input>(

@@ -9,7 +9,6 @@ use crate::{
 		ChainPart,
 		VariableDefinition,
 		CommandContext,
-		StringPart,
 		RedirectionType,
 		Type,
 		Value,
@@ -18,6 +17,7 @@ use crate::{
 		CommandStatement,
 	}
 };
+use std::borrow::Cow;
 use lasso::Spur;
 
 extern {
@@ -53,8 +53,8 @@ extern {
 		"=>" => lexer::Token::Arrow,
 		id => lexer::Token::Identifier(<&'input str>),
 		word => lexer::Token::Word(<&'input str>),
-		str => lexer::Token::StrLitteral(<&'input str>),
-		istr => lexer::Token::InterpolatedString(<&'input str>),
+		str => lexer::Token::StrLitteral(<Cow<'input, str>>),
+		istr => lexer::Token::InterpolatedString(<Cow<'input, str>>),
 		int => lexer::Token::IntNum(<i64>),
 	}
 }
@@ -92,13 +92,13 @@ Expression: Expression<'input> = {
 			None => exps,
 		}
 	},
-	Word =>? Ok(Expression::Interpolated(StringPart::interpolate(<>, ctx)?)),
-	istr =>? Ok(Expression::Interpolated(StringPart::interpolate(<>, ctx)?)),
+	Word => Expression::Interpolated(Cow::Borrowed(<>)),
+	istr => Expression::Interpolated(<>),
 	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
 };
 
 pub(crate) StrongExpression: Expression<'input> = {
-	istr =>? Ok(Expression::Interpolated(StringPart::interpolate(<>, ctx)?)),
+	istr => Expression::Interpolated(<>),
 	"$(" <cmd:CommandContext> ")" => Expression::SubShell(Box::new(cmd)),
 	Value => Expression::Value(<>),
 	<fun:Call> "(" <mut exps:(<StrongExpression> ",")*> <tl:StrongExpression?> ")" => Expression::Call {
