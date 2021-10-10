@@ -34,11 +34,40 @@ pub type AstResult<T> = Result<T, InterpolationError>;
 static INTERPOLATION_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\$[a-zA-Z0-9_]+|\$\{[^{}]*\}").unwrap());
 
+impl StringPart<'static> {
+    fn interpolate_owned(s: String, ctx: &mut ShellContext) -> AstResult<Vec<Self>> {
+        let mut idx = 0;
+        let mut interpolation = Vec::new();
+
+        for mtch in INTERPOLATION_REGEX.find_iter(&s) {
+            if mtch.start() != idx {
+                interpolation.push(Self::Text(Cow::Owned(String::from(&s[idx..mtch.start()]))));
+            }
+            idx = mtch.end();
+            let match_expr = &mtch.as_str()[1..];
+            if match_expr.starts_with("{") {
+                let input = match_expr.trim_start_matches('{').trim_end_matches('}');
+                let expr = rsh::StrongExpressionParser::new()
+                    .parse(ctx, input, lexer::lexer(&input))
+                    .map_err(|_| InterpolationError)?;
+                interpolation.push(Self::Expression(Expression::from_ast(expr, ctx)?.owned()));
+            } else {
+                interpolation.push(Self::Variable(ctx.rodeo.get_or_intern(&mtch.as_str()[1..])));
+            }
+        }
+        if idx < s.len() {
+            interpolation.push(Self::Text(Cow::Owned(String::from(&s[idx..]))))
+        }
+
+        Ok(interpolation)
+    }
+}
+
 impl<'input> StringPart<'input> {
     pub fn interpolate(s: Cow<'input, str>, ctx: &mut ShellContext) -> AstResult<Vec<Self>> {
         match s {
             Cow::Borrowed(b) => StringPart::interpolate_borrowed(b, ctx),
-            Cow::Owned(_) => todo!(),
+            Cow::Owned(o) => StringPart::interpolate_owned(o, ctx),
         }
     }
 
