@@ -34,5 +34,6 @@ pub(crate) fn builtins() -> Vec<BuiltinFunction> {
         fn json(Dynamic) -> String;
         fn range(Int,Int) -> Iterator(Box::new(Int));
         fn next(Iterator(Box::new(Dynamic))) -> Option(Box::new(Dynamic));
+        fn print(Dynamic) -> Unit;
     )
 }

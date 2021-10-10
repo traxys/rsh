@@ -257,6 +257,8 @@ pub enum Statement<'input> {
         blk: Vec<CommandStatement<'input>>,
         capture: Option<Spur>,
     },
+    #[serde(borrow)]
+    Expr(Expression<'input>),
 }
 
 impl<'a> Statement<'a> {
@@ -267,6 +269,7 @@ impl<'a> Statement<'a> {
                 capture,
                 blk: convert_vec(blk, |c| c.owned()),
             },
+            Statement::Expr(e) => Statement::Expr(e.owned()),
         }
     }
 }
@@ -279,6 +282,7 @@ impl<'a> From<ast::Statement<'a>> for Statement<'a> {
                 blk: blk.into_iter().map(Into::into).collect(),
                 capture,
             },
+            ast::Statement::Expr(e) => Self::Expr(e.into()),
         }
     }
 }

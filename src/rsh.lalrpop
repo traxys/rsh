@@ -211,6 +211,7 @@ Statement: Statement<'input> = {
 	"let" <VariableDefinition> ";" => Statement::VarDef(<>),
 	<CmdBlk> => Statement::Cmd{blk: <>, capture: None},
 	"capture" "(" <capture:Identifier> ")" <blk:CmdBlk> => Statement::Cmd{blk, capture: Some(capture)},
+	<e:StrongExpression> ";" => Statement::Expr(e),
 };
 
 StatementLine: Statement<'input> = {

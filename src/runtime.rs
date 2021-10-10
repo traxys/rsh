@@ -54,6 +54,7 @@ enum Value {
     Iterator(IteratorValue),
     Option(Option<Gc<Value>>),
     Private(PrivateValue),
+    Unit,
 }
 
 #[derive(Debug, Clone, Trace, Finalize)]
@@ -105,6 +106,7 @@ impl Serialize for Value {
             Value::Private(_) => Err(serde::ser::Error::custom(
                 "private values are not serializable",
             )),
+            Value::Unit => serializer.serialize_unit(),
         }
     }
 }
@@ -168,6 +170,7 @@ impl Value {
             )
             .into(),
             Value::Private(_) => "<private>".to_owned().into(),
+            Value::Unit => "()".to_owned().into(),
         }
     }
 
@@ -182,6 +185,7 @@ impl Value {
             Value::Function(_) => todo!(),
             Value::Iterator { .. } => todo!(),
             Value::Private(_) => Type::Private,
+            Value::Unit => Type::Unit,
         }
     }
 
@@ -303,6 +307,13 @@ impl<'input> RuntimeCtx<'input> {
                 let it = args[0].as_iter()?;
                 let next = self.call_function_value(&it.next, vec![args[0].clone()]);
                 next
+            }
+            // print
+            // TODO: capture print when required
+            5 => {
+                check_args(1, &args)?;
+                print!("{}", args[0].to_string());
+                Ok(Value::Unit)
             }
             _ => unreachable!("invalid native function got called ({})", id),
         }
@@ -746,6 +757,9 @@ impl<'input> RuntimeCtx<'input> {
                     self.run_cmd_stmt(cmd, Some(&mut output))?;
                 }
                 self.set_value(var, Value::Bytes(Rc::new(output)));
+            }
+            Statement::Expr(e) => {
+                self.eval_expr(&e)?;
             }
         }
         Ok(())

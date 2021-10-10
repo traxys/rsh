@@ -83,7 +83,8 @@ pub enum Token<'input> {
     #[display(fmt = "string({})", _0)]
     StrLitteral(&'input str),
     #[regex(r#""(\\[^\n]|[^"\n])*""#, |lex| {
-        lex.slice()
+        let s = lex.slice();
+        &s[1..s.len() - 1]
     })]
     #[display(fmt = "istring({})", _0)]
     InterpolatedString(&'input str),

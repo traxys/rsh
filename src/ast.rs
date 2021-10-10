@@ -89,6 +89,7 @@ pub enum Type {
     String,
     Bytes,
     Private,
+    Unit,
     Function { ret: Box<Type>, args: Vec<Type> },
     List(Box<Type>),
     Iterator(Box<Type>),
@@ -109,6 +110,7 @@ impl Type {
             (Self::Int, Self::Int) => TypeCheck::Compatible,
             (Self::String | Self::Bytes, Self::String | Self::Bytes) => TypeCheck::Compatible,
             (Self::Function { .. }, Self::Function { .. }) => TypeCheck::Compatible,
+            (Self::Unit, Self::Unit) => TypeCheck::Compatible,
             _ => TypeCheck::Incompatible,
         }
     }
@@ -137,6 +139,7 @@ impl std::fmt::Display for Type {
             Type::List(inner) => write!(f, "[{}]", inner),
             Type::Iterator(item) => write!(f, "Iterator<{}>", item),
             Type::Option(item) => write!(f, "Option<{}>", item),
+            Type::Unit => write!(f, "()"),
         }
     }
 }
@@ -174,6 +177,8 @@ pub enum Statement<'input> {
         blk: Vec<CommandStatement<'input>>,
         capture: Option<Spur>,
     },
+    #[serde(borrow)]
+    Expr(Expression<'input>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
