@@ -360,7 +360,9 @@ impl Styling {
     fn paint(&self, source: &str) -> String {
         let mut s = Vec::new();
 
-        for (&start, (style, end)) in self.current.iter() {
+        let mut styling: Vec<_> = self.current.iter().collect();
+        styling.sort_by(|(start1, _), (start2, _)| start1.cmp(start2));
+        for (&start, (style, end)) in styling {
             style
                 .paint(&source.as_bytes()[start..*end])
                 .write_to(&mut s)
