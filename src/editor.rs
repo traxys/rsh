@@ -4,29 +4,10 @@ use rustyline::{highlight::Highlighter as HiTrait, Helper};
 use rustyline_derive::{Completer, Hinter, Validator};
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
-use std::{cell::RefCell, collections::HashMap, fmt::Write, path::Path};
+use std::{cell::RefCell, collections::HashMap, fmt::Write};
+use tree_sitter::{Query, QueryCursor};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
-
-const HIGHLGHTS_NAMES: &[&str] = &[
-    "attribute",
-    "constant",
-    "function.builtin",
-    "function",
-    "keyword",
-    "operator",
-    "property",
-    "punctuation",
-    "punctuation.bracket",
-    "punctuation.delimiter",
-    "string",
-    "string.special",
-    "tag",
-    "type",
-    "type.builtin",
-    "variable",
-    "variable.builtin",
-    "variable.parameter",
-];
+use which::which;
 
 lazy_static! {
     static ref CSS_STYLES_BY_COLOR_ID: Vec<String> =
@@ -52,10 +33,10 @@ pub struct ThemeConfig {
 }
 
 impl Theme {
-    pub fn load(path: &Path) -> std::io::Result<Self> {
+    /* pub fn load(path: &Path) -> std::io::Result<Self> {
         let json = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&json).unwrap_or_default())
-    }
+    } */
 
     pub fn default_style(&self) -> Style {
         Style::default()
@@ -332,35 +313,72 @@ pub(crate) struct Editor {
     hi: RefCell<Highlighter>,
     hi_cfg: HighlightConfiguration,
     hi_theme: Theme,
+    cmd_query: Query,
 }
 
 impl Editor {
     pub fn new() -> Self {
-        let mut hi_cfg = HighlightConfiguration::new(
-            tree_sitter_rsh::language(),
-            tree_sitter_rsh::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        )
-        .expect("Could not init tree sitter");
-        hi_cfg.configure(HIGHLGHTS_NAMES);
-        dbg!(tree_sitter_rsh::HIGHLIGHTS_QUERY);
+        let lang = tree_sitter_rshcmd::language();
+        let mut hi_cfg =
+            HighlightConfiguration::new(lang, tree_sitter_rshcmd::HIGHLIGHTS_QUERY, "", "")
+                .expect("Could not init tree sitter");
+        let hi_theme: Theme = Default::default();
+        hi_cfg.configure(&hi_theme.highlight_names);
         Editor {
             hi: RefCell::new(Highlighter::new()),
             hi_cfg,
-            hi_theme: Default::default(),
+            hi_theme,
+            cmd_query: Query::new(lang, r"(cmd_name (identifier) @cmd)")
+                .expect("error building query"),
         }
     }
 }
 
+struct Styling {
+    current: HashMap<usize, (ansi_term::Style, usize)>,
+}
+
+impl Styling {
+    fn new() -> Self {
+        Styling {
+            current: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, style: ansi_term::Style, start: usize, end: usize) {
+        match self.current.remove(&start) {
+            None => {
+                self.current.insert(start, (style, end));
+            }
+            Some((st, en)) => {
+                self.current.insert(start, (style, end));
+                self.insert(st, end, en)
+            }
+        };
+    }
+
+    fn paint(&self, source: &str) -> String {
+        let mut s = Vec::new();
+
+        for (&start, (style, end)) in self.current.iter() {
+            style
+                .paint(&source.as_bytes()[start..*end])
+                .write_to(&mut s)
+                .expect("can fail write in string?");
+        }
+
+        String::from_utf8(s).expect("we got UTF-8 in, hi is UTF8")
+    }
+}
+
 impl HiTrait for Editor {
-    fn highlight<'l>(&self, line: &'l str, pos: usize) -> std::borrow::Cow<'l, str> {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
         let mut hi = self.hi.borrow_mut();
         let events = hi
             .highlight(&self.hi_cfg, line.as_bytes(), None, |_| None)
             .expect("hi failed");
 
-        let mut s = Vec::new();
+        let mut stylings = Styling::new();
 
         let mut style_stack = vec![self.hi_theme.default_style().ansi];
         for event in events {
@@ -372,19 +390,31 @@ impl HiTrait for Editor {
                     style_stack.pop();
                 }
                 HighlightEvent::Source { start, end } => {
-                    style_stack
-                        .last()
-                        .unwrap()
-                        .paint(&line.as_bytes()[start..end])
-                        .write_to(&mut s)
-                        .expect("can fail write in string?");
+                    let style = style_stack.last().unwrap();
+                    stylings.insert(style.clone(), start, end);
                 }
             }
         }
 
-        let s = String::from_utf8(s).expect("we got UTF-8 in, hi is UTF8");
+        let parsed = hi.parser().parse(line, None);
+        if let Some(parsed) = parsed {
+            for query_match in
+                QueryCursor::new().matches(&self.cmd_query, parsed.root_node(), line.as_bytes())
+            {
+                for capture in query_match.captures {
+                    let start = capture.node.start_byte();
+                    let end = capture.node.end_byte();
+                    let is_exec = which(&line[start..end]).is_ok();
+                    if is_exec {
+                        stylings.insert(ansi_term::Style::new().fg(Color::Green), start, end);
+                    } else {
+                        stylings.insert(ansi_term::Style::new().fg(Color::Red), start, end);
+                    }
+                }
+            }
+        }
 
-        s.into()
+        stylings.paint(line).into()
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize) -> bool {

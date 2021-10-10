@@ -134,7 +134,7 @@ fn interactive_loop<E: rustyline::Helper>(
                     }
                     Ok(v) => v.into(),
                 };
-                match rt_ctx.run_cmd_stmt(parsed.owned()) {
+                match rt_ctx.run_cmd_stmt(parsed.owned(), None) {
                     Err(RuntimeError::Exit(v)) => return Ok(v),
                     Err(e) => println!("  Runtime Error: {}", yansi::Paint::red(e)),
                     Ok(_) => (),
@@ -215,7 +215,7 @@ impl Builtin {
                     ron::from_str(&ast)?
                 };
                 let mut rt_ctx = RuntimeCtx::new(shell_ctx);
-                rt_ctx.run_cmd_ctx(ast)?;
+                rt_ctx.run_cmd_ctx(ast, None)?;
             }
         }
 

@@ -209,8 +209,8 @@ CmdBlk: Vec<CommandStatement<'input>> = {
 
 Statement: Statement<'input> = {
 	"let" <VariableDefinition> ";" => Statement::VarDef(<>),
-	<CmdBlk> => Statement::Cmd{blk: <>, capture: false},
-	"capture" <blk:CmdBlk> => Statement::Cmd{blk, capture: true},
+	<CmdBlk> => Statement::Cmd{blk: <>, capture: None},
+	"capture" "(" <capture:Identifier> ")" <blk:CmdBlk> => Statement::Cmd{blk, capture: Some(capture)},
 };
 
 StatementLine: Statement<'input> = {

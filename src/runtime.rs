@@ -10,6 +10,7 @@ use shared_child::SharedChild;
 use std::{
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
+    io::Read,
     process::{self, ExitStatus, Stdio},
     rc::Rc,
 };
@@ -409,6 +410,7 @@ impl<'input> RuntimeCtx<'input> {
     fn prepare_pipeline(
         &mut self,
         pipeline: &cow_ast::Pipeline<'input>,
+        save_output: bool,
     ) -> RuntimeResult<(Vec<process::Child>, process::Command)> {
         let mut prepared: Vec<_> = pipeline
             .commands
@@ -416,7 +418,13 @@ impl<'input> RuntimeCtx<'input> {
             .map(|c| self.prepare_cmd(c))
             .collect::<RuntimeResult<_>>()?;
         if prepared.len() == 1 {
-            return Ok((vec![], prepared.pop().unwrap()));
+            let mut last = prepared.pop().unwrap();
+
+            if save_output {
+                last.stdout(Stdio::piped());
+            }
+
+            return Ok((vec![], last));
         } else {
             let mut children = vec![prepared[0].stdout(Stdio::piped()).spawn()?];
             let len = prepared.len();
@@ -432,12 +440,20 @@ impl<'input> RuntimeCtx<'input> {
             let mut last = prepared.pop().unwrap();
             last.stdin(children.last_mut().unwrap().stdout.take().unwrap());
 
+            if save_output {
+                last.stdout(Stdio::piped());
+            }
+
             Ok((children, last))
         }
     }
 
-    fn run_pipeline(&mut self, pipeline: &cow_ast::Pipeline<'input>) -> RuntimeResult<ExitStatus> {
-        let (mut children, mut last) = self.prepare_pipeline(pipeline)?;
+    fn run_pipeline(
+        &mut self,
+        pipeline: &cow_ast::Pipeline<'input>,
+        output: Option<&mut Vec<u8>>,
+    ) -> RuntimeResult<ExitStatus> {
+        let (mut children, mut last) = self.prepare_pipeline(pipeline, output.is_some())?;
         let command = SharedChild::spawn(&mut last)?;
         *self.shell_ctx.current_process.write().unwrap() = Some(command);
         let res = self
@@ -449,6 +465,14 @@ impl<'input> RuntimeCtx<'input> {
             .unwrap()
             .wait()
             .map_err(Into::into);
+        let child = self.shell_ctx.current_process.write().unwrap().take();
+        if let Some(out) = output {
+            if let Some(child) = child {
+                if let Some(mut stdout) = child.into_inner().stdout {
+                    stdout.read_to_end(out)?;
+                }
+            }
+        }
 
         children.iter_mut().for_each(|p| {
             let _ = p.kill();
@@ -457,47 +481,63 @@ impl<'input> RuntimeCtx<'input> {
         res
     }
 
-    fn run_chain_part(&mut self, chain_part: &cow_ast::ChainPart<'input>) -> RuntimeResult<ExitStatus> {
+    fn run_chain_part(
+        &mut self,
+        chain_part: &cow_ast::ChainPart<'input>,
+        output: Option<&mut Vec<u8>>,
+    ) -> RuntimeResult<ExitStatus> {
         match chain_part {
-            cow_ast::ChainPart::Pipeline(p) => self.run_pipeline(p),
-            cow_ast::ChainPart::Chain(c) => self.run_chain(c),
+            cow_ast::ChainPart::Pipeline(p) => self.run_pipeline(p, output),
+            cow_ast::ChainPart::Chain(c) => self.run_chain(c, output),
         }
     }
 
-    fn run_chain(&mut self, chain: &cow_ast::CommandChain<'input>) -> RuntimeResult<ExitStatus> {
+    fn run_chain(
+        &mut self,
+        chain: &cow_ast::CommandChain<'input>,
+        mut output: Option<&mut Vec<u8>>,
+    ) -> RuntimeResult<ExitStatus> {
         match chain {
             cow_ast::CommandChain::Or(c, rest) => {
-                let result = self.run_chain_part(c)?;
+                let result = self.run_chain_part(c, output.as_deref_mut())?;
                 if result.success() {
                     Ok(result)
                 } else {
-                    self.run_chain(rest)
+                    self.run_chain(rest, output)
                 }
             }
             cow_ast::CommandChain::And(c, rest) => {
-                let result = self.run_chain_part(c)?;
+                let result = self.run_chain_part(c, output.as_deref_mut())?;
                 if result.success() {
-                    self.run_chain(rest)
+                    self.run_chain(rest, output)
                 } else {
                     Ok(result)
                 }
             }
-            cow_ast::CommandChain::Pipeline(p) => self.run_pipeline(p),
+            cow_ast::CommandChain::Pipeline(p) => self.run_pipeline(p, output),
         }
     }
 
-    pub fn run_cmd_stmt(&mut self, cmd_stmt: cow_ast::CommandStatement<'input>) -> RuntimeResult<()> {
+    pub fn run_cmd_stmt(
+        &mut self,
+        cmd_stmt: cow_ast::CommandStatement<'input>,
+        output: Option<&mut Vec<u8>>,
+    ) -> RuntimeResult<()> {
         match cmd_stmt {
             cow_ast::CommandStatement::Definitions(defs) => {
                 defs.into_iter().for_each(|def| self.update_overlay(def))
             }
-            cow_ast::CommandStatement::Commands(ctx) => self.run_cmd_ctx(ctx)?,
+            cow_ast::CommandStatement::Commands(ctx) => self.run_cmd_ctx(ctx, output)?,
         }
 
         Ok(())
     }
 
-    pub fn run_cmd_ctx(&mut self, cmd_ctx: cow_ast::CommandContext<'input>) -> RuntimeResult<()> {
+    pub fn run_cmd_ctx(
+        &mut self,
+        cmd_ctx: cow_ast::CommandContext<'input>,
+        mut output: Option<&mut Vec<u8>>,
+    ) -> RuntimeResult<()> {
         TypeCheckerCtx::new(self.shell_ctx)
             .check_cmd_ctx(&cmd_ctx)
             .map_err(|ty_errs| RuntimeError::Static(ty_errs))?;
@@ -505,7 +545,7 @@ impl<'input> RuntimeCtx<'input> {
         self.enter_overlay(cmd_ctx.variables);
 
         for command in &cmd_ctx.commands {
-            self.shell_ctx.last_exit = Some(self.run_chain(command)?);
+            self.shell_ctx.last_exit = Some(self.run_chain(command, output.as_deref_mut())?);
         }
 
         self.overlays.pop();
@@ -526,7 +566,9 @@ impl<'input> RuntimeCtx<'input> {
                 .try_fold(String::new(), |mut current, segment| -> RuntimeResult<_> {
                     match segment {
                         cow_ast::StringPart::Text(s) => current.push_str(s),
-                        cow_ast::StringPart::Variable(v) => current.push_str(&self.resolve_text(*v)?),
+                        cow_ast::StringPart::Variable(v) => {
+                            current.push_str(&self.resolve_text(*v)?)
+                        }
                         cow_ast::StringPart::Expression(e) => {
                             current.push_str(&self.eval_expr(e)?.to_string())
                         }
@@ -681,18 +723,29 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
+    fn set_value(&mut self, spur: Spur, value: Value) {
+        self.overlays.last_mut().unwrap().values.insert(spur, value);
+    }
+
     pub fn run_statement(&mut self, statement: Statement<'input>) -> RuntimeResult<()> {
         match statement {
             Statement::VarDef(v) => {
                 self.enter_single_overlay(v);
             }
+            Statement::Cmd { blk, capture: None } => {
+                for cmd in blk {
+                    self.run_cmd_stmt(cmd, None)?;
+                }
+            }
             Statement::Cmd {
                 blk,
-                capture: _capture,
+                capture: Some(var),
             } => {
+                let mut output = Vec::new();
                 for cmd in blk {
-                    self.run_cmd_stmt(cmd)?;
+                    self.run_cmd_stmt(cmd, Some(&mut output))?;
                 }
+                self.set_value(var, Value::Bytes(Rc::new(output)));
             }
         }
         Ok(())

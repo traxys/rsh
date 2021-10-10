@@ -172,7 +172,7 @@ pub enum Statement<'input> {
     Cmd {
         #[serde(borrow)]
         blk: Vec<CommandStatement<'input>>,
-        capture: bool,
+        capture: Option<Spur>,
     },
 }
 
