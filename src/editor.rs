@@ -4,7 +4,7 @@ use rustyline::{highlight::Highlighter as HiTrait, Helper};
 use rustyline_derive::{Completer, Hinter, Validator};
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
-use std::{cell::RefCell, collections::HashMap, fmt::Write};
+use std::{cell::RefCell, collections::HashMap, fmt::Write, ops::Range};
 use tree_sitter::{Query, QueryCursor};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 use which::which;
@@ -335,36 +335,67 @@ impl Editor {
 }
 
 struct Styling {
-    current: HashMap<usize, (ansi_term::Style, usize)>,
+    current: Vec<StylingChoice>,
+}
+
+struct StylingChoice {
+    range: Range<usize>,
+    style: ansi_term::Style,
+    prio: usize,
 }
 
 impl Styling {
-    fn new() -> Self {
+    fn new(_len: usize) -> Self {
         Styling {
-            current: HashMap::new(),
+            //           current: vec![(0..len, (ansi_term::Style::new(), 0))],
+            current: Vec::new(),
         }
     }
 
-    fn insert(&mut self, style: ansi_term::Style, start: usize, end: usize) {
-        match self.current.remove(&start) {
-            None => {
-                self.current.insert(start, (style, end));
+    fn insert(&mut self, style: ansi_term::Style, range: Range<usize>, prio: usize) {
+        self.current.push(StylingChoice { range, style, prio });
+    }
+
+    fn find_style(&self, idx: usize) -> Option<(usize, &ansi_term::Style)> {
+        let (idx, choice) = self
+            .current
+            .iter()
+            .enumerate()
+            .filter(|(_, choice)| choice.range.contains(&idx))
+            .max_by(|(_, c1), (_, c2)| c1.prio.cmp(&c2.prio))?;
+        Some((idx, &choice.style))
+    }
+
+    fn resolve_ranges(&self, len: usize) -> Vec<(Range<usize>, &ansi_term::Style)> {
+        if len > 0 {
+            let mut ranges = Vec::new();
+
+            let mut current_range = (0, 1);
+            let mut current_style = self.find_style(0).unwrap();
+
+            for i in 1..len {
+                let (idx, style) = self.find_style(i).unwrap();
+                if idx != current_style.0 {
+                    ranges.push((current_range.0..current_range.1, current_style.1));
+                    current_style = (idx, style);
+                    current_range.0 = i;
+                }
+                current_range.1 += 1;
             }
-            Some((st, en)) => {
-                self.current.insert(start, (style, end));
-                self.insert(st, end, en)
-            }
-        };
+
+            ranges.push((current_range.0..current_range.1, current_style.1));
+            ranges
+        } else {
+            return Vec::new();
+        }
     }
 
     fn paint(&self, source: &str) -> String {
         let mut s = Vec::new();
 
-        let mut styling: Vec<_> = self.current.iter().collect();
-        styling.sort_by(|(start1, _), (start2, _)| start1.cmp(start2));
-        for (&start, (style, end)) in styling {
+        for (range, style) in self.resolve_ranges(source.len()) {
             style
-                .paint(&source.as_bytes()[start..*end])
+                .paint(&source.as_bytes()[range])
                 .write_to(&mut s)
                 .expect("can fail write in string?");
         }
@@ -380,7 +411,7 @@ impl HiTrait for Editor {
             .highlight(&self.hi_cfg, line.as_bytes(), None, |_| None)
             .expect("hi failed");
 
-        let mut stylings = Styling::new();
+        let mut stylings = Styling::new(line.len());
 
         let mut style_stack = vec![self.hi_theme.default_style().ansi];
         for event in events {
@@ -393,7 +424,7 @@ impl HiTrait for Editor {
                 }
                 HighlightEvent::Source { start, end } => {
                     let style = style_stack.last().unwrap();
-                    stylings.insert(style.clone(), start, end);
+                    stylings.insert(style.clone(), start..end, 1);
                 }
             }
         }
@@ -408,9 +439,9 @@ impl HiTrait for Editor {
                     let end = capture.node.end_byte();
                     let is_exec = which(&line[start..end]).is_ok();
                     if is_exec {
-                        stylings.insert(ansi_term::Style::new().fg(Color::Green), start, end);
+                        stylings.insert(ansi_term::Style::new().fg(Color::Green), start..end, 2);
                     } else {
-                        stylings.insert(ansi_term::Style::new().fg(Color::Red), start, end);
+                        stylings.insert(ansi_term::Style::new().fg(Color::Red), start..end, 2);
                     }
                 }
             }
