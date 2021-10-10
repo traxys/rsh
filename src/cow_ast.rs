@@ -363,14 +363,6 @@ pub enum Value<'input> {
 }
 
 impl<'input> Value<'input> {
-    pub fn ty(&self) -> Type {
-        match self {
-            Value::String(_) => Type::String,
-            Value::Int(_) => Type::Int,
-            Value::List(_) => Type::List(Box::new(Type::Dynamic)),
-        }
-    }
-
     pub fn owned<'b>(self) -> Value<'b> {
         match self {
             Value::String(s) => Value::String(cow_to_owned(s)),

@@ -163,6 +163,7 @@ Type: Type = {
 	"int" => Type::Int,
 	"any" => Type::Dynamic,
 	"str" => Type::String,
+	"[" <ty:Type> "]" => Type::List(Box::new(ty)),
 };
 
 Identifier: Spur = {

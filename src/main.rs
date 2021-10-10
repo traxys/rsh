@@ -133,7 +133,16 @@ fn interactive_loop<E: rustyline::Helper>(
                         println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
                         continue;
                     }
-                    Ok(v) => cow_ast::CommandStatement::from_ast(v, rt_ctx.shell_ctx)?,
+                    Ok(v) => match cow_ast::CommandStatement::from_ast(v, rt_ctx.shell_ctx) {
+                        Err(e) => {
+                            println!(
+                                "  Interpolation Error: {}",
+                                yansi::Paint::red(e.to_string())
+                            );
+                            continue;
+                        }
+                        Ok(v) => v,
+                    },
                 };
                 match rt_ctx.run_cmd_stmt(parsed.owned(), None) {
                     Err(RuntimeError::Exit(v)) => return Ok(v),

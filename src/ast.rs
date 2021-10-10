@@ -55,6 +55,7 @@ pub enum Type {
     Option(Box<Type>),
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) enum TypeCheck {
     Compatible,
     Incompatible,
@@ -62,6 +63,7 @@ pub(crate) enum TypeCheck {
 }
 
 impl Type {
+    // Can you assign a expr_ty to self ?
     pub(crate) fn is_compatible(&self, expr_ty: &Type) -> TypeCheck {
         match (self, expr_ty) {
             (Self::Dynamic, _) => TypeCheck::Compatible,
@@ -70,6 +72,7 @@ impl Type {
             (Self::String | Self::Bytes, Self::String | Self::Bytes) => TypeCheck::Compatible,
             (Self::Function { .. }, Self::Function { .. }) => TypeCheck::Compatible,
             (Self::Unit, Self::Unit) => TypeCheck::Compatible,
+            (Self::List(s), Self::List(e)) => s.is_compatible(e),
             _ => TypeCheck::Incompatible,
         }
     }

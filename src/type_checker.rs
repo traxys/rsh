@@ -165,7 +165,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
 
     fn check_expression(&mut self, expr: &cow_ast::Expression) -> TypeCheckResult<Type> {
         match expr {
-            cow_ast::Expression::Value(v) => Ok(v.ty()),
+            cow_ast::Expression::Value(v) => Ok(self.check_value(v)?),
             cow_ast::Expression::Method { value, name, args } => {
                 let (value_ty, args_ty) = merge_errors(
                     self.check_expression(value),
@@ -245,6 +245,25 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                             .to_string(),
                     )])
                 })
+            }
+        }
+    }
+
+    fn check_value(&mut self, value: &cow_ast::Value) -> TypeCheckResult<Type> {
+        match value {
+            cow_ast::Value::String(_) => Ok(Type::String),
+            cow_ast::Value::Int(_) => Ok(Type::Int),
+            cow_ast::Value::List(l) => {
+                if l.len() == 0 {
+                    return Ok(Type::List(Box::new(Type::Dynamic)));
+                }
+                let ty = self.check_expression(l.first().unwrap())?;
+                for x in l.iter().skip(1) {
+                    if ty.is_compatible(&self.check_expression(x)?) == TypeCheck::Incompatible {
+                        return Ok(Type::List(Box::new(Type::Dynamic)));
+                    }
+                }
+                Ok(Type::List(Box::new(ty)))
             }
         }
     }
