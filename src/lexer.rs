@@ -37,6 +37,9 @@ pub enum Token<'input> {
     #[token(">")]
     #[display(fmt = ">")]
     OutRedir,
+    #[token("!")]
+    #[display(fmt = "!")]
+    Bang,
     #[token("[")]
     #[display(fmt = "[")]
     LBracket,

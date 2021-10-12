@@ -403,6 +403,8 @@ pub enum Expression<'input> {
         ret: Type,
         body: Vec<Statement<'input>>,
     },
+    #[serde(borrow)]
+    Unwrap(Box<Expression<'input>>),
 }
 
 impl<'a> Expression<'a> {
@@ -426,6 +428,7 @@ impl<'a> Expression<'a> {
                 ret,
                 body: convert_vec(body, |s| s.owned()),
             },
+            Expression::Unwrap(v) => Expression::Unwrap(Box::new(v.owned())),
         }
     }
 }
@@ -455,6 +458,9 @@ impl<'a> Expression<'a> {
                 ret,
                 body: try_convert_vec(body, |s| Statement::from_ast(s, sh_ctx))?,
             }),
+            ast::Expression::Unwrap(e) => {
+                Ok(Self::Unwrap(Box::new(Expression::from_ast(*e, sh_ctx)?)))
+            }
         }
     }
 }

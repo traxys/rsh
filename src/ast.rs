@@ -183,4 +183,6 @@ pub enum Expression<'input> {
         ret: Type,
         body: Vec<Statement<'input>>,
     },
+    #[serde(borrow)]
+    Unwrap(Box<Expression<'input>>),
 }

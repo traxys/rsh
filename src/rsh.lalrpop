@@ -49,6 +49,7 @@ extern {
 		"]" => lexer::Token::RBracket,
 		"{" => lexer::Token::LBrace,
 		"}" => lexer::Token::RBrace,
+		"!" => lexer::Token::Bang,
 		"cmd" => lexer::Token::Cmd,
 		"capture" => lexer::Token::Capture,
 		"=>" => lexer::Token::Arrow,
@@ -118,7 +119,13 @@ pub(crate) StrongExpression: Expression<'input> = {
 		args,
 	},
 	<id:Identifier> => Expression::Variable(id),
-	"fn" "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:Script> "}" => Expression::FuncDef{args, ret: ret.unwrap_or(Type::Unit), body},
+	"fn" "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:Script> "}" => 
+		Expression::FuncDef {
+			args, 
+			ret: ret.unwrap_or(Type::Unit), 
+			body
+		},
+	<expr:StrongExpression> "!" => Expression::Unwrap(Box::new(expr)),
 };
 
 Ret: Type = {

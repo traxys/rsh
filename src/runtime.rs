@@ -42,6 +42,8 @@ pub enum RuntimeError {
     InvalidArgCount { expected: usize, got: usize },
     #[error("unexpected error: {}", _0)]
     UnexpectedError(String),
+    #[error("tried to unwrap None")]
+    UnwrapedNone,
 }
 
 #[derive(Debug, Clone, Trace, Finalize)]
@@ -51,7 +53,7 @@ enum Value {
     Int(i64),
     Bytes(Rc<Vec<u8>>),
     Function(FunctionValue),
-    List(Gc<Vec<GcCell<Value>>>),
+    List(Gc<Vec<GcCell<Gc<Value>>>>),
     Iterator(IteratorValue),
     Option(Option<Gc<Value>>),
     Private(PrivateValue),
@@ -327,7 +329,7 @@ struct Closure<'input> {
     ret: Type,
     args: Vec<(Spur, Type)>,
     body: Vec<Statement<'input>>,
-    captures: Vec<(Spur, Value)>,
+    captures: Vec<(Spur, Gc<Value>)>,
 }
 
 #[derive(Debug)]
@@ -348,7 +350,7 @@ pub struct RuntimeCtx<'input> {
 pub struct Overlay<'input> {
     definitions: HashMap<Spur, cow_ast::Expression<'input>>,
     types: HashMap<Spur, Type>,
-    values: HashMap<Spur, Value>,
+    values: HashMap<Spur, Gc<Value>>,
     currently_evaluating: HashSet<Spur>,
 }
 
@@ -357,7 +359,10 @@ fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
     let mut types = HashMap::new();
     for (id, f) in sh_ctx.builtins.iter().enumerate() {
         let spur = sh_ctx.rodeo.get_or_intern_static(f.name);
-        values.insert(spur, Value::Function(FunctionValue::NativeFn(id as isize)));
+        values.insert(
+            spur,
+            Gc::new(Value::Function(FunctionValue::NativeFn(id as isize))),
+        );
         types.insert(spur, f.ty());
     }
     Overlay {
@@ -498,6 +503,7 @@ impl CaptureCtx {
                 self.process_body(body);
                 self.defined.pop();
             }
+            cow_ast::Expression::Unwrap(v) => self.process_expr(v),
         }
     }
 
@@ -513,8 +519,12 @@ impl CaptureCtx {
 }
 
 impl<'input> RuntimeCtx<'input> {
-    fn call_native_function(&mut self, id: isize, args: Vec<Value>) -> RuntimeResult<Value> {
-        fn check_args(expected: usize, args: &[Value]) -> RuntimeResult<()> {
+    fn call_native_function(
+        &mut self,
+        id: isize,
+        args: Vec<Gc<Value>>,
+    ) -> RuntimeResult<Gc<Value>> {
+        fn check_args(expected: usize, args: &[Gc<Value>]) -> RuntimeResult<()> {
             if args.len() != expected {
                 Err(RuntimeError::InvalidArgCount {
                     expected,
@@ -535,15 +545,15 @@ impl<'input> RuntimeCtx<'input> {
                     PrivateValue::Range { start, end } if *start < *end => {
                         let ret = *start;
                         *start += 1;
-                        Ok(Value::Option(Some(Gc::new(Value::Int(ret)))))
+                        Ok(Gc::new(Value::Option(Some(Gc::new(Value::Int(ret))))))
                     }
-                    _ => Ok(Value::Option(None)),
+                    _ => Ok(Gc::new(Value::Option(None))),
                 }
             }
             // s
             0 => {
                 check_args(1, &args)?;
-                Ok(Value::Str(args[0].to_string(self)))
+                Ok(Gc::new(Value::Str(args[0].to_string(self))))
             }
             // env =>
             1 => {
@@ -556,7 +566,7 @@ impl<'input> RuntimeCtx<'input> {
             // json
             2 => {
                 check_args(1, &args)?;
-                Ok(Value::Str(serde_json::to_string(&args[0])?.into()))
+                Ok(Gc::new(Value::Str(serde_json::to_string(&args[0])?.into())))
             }
             // range
             3 => {
@@ -564,10 +574,10 @@ impl<'input> RuntimeCtx<'input> {
                 let start = args[0].as_int(&self.closures, self.shell_ctx)?;
                 let end = args[1].as_int(&self.closures, self.shell_ctx)?;
                 let range = Value::Private(PrivateValue::Range { start, end });
-                Ok(Value::Iterator(IteratorValue {
+                Ok(Gc::new(Value::Iterator(IteratorValue {
                     value: Gc::new(GcCell::new(range)),
                     next: FunctionValue::NativeFn(-1),
-                }))
+                })))
             }
             // next
             4 => {
@@ -581,7 +591,7 @@ impl<'input> RuntimeCtx<'input> {
             5 => {
                 check_args(1, &args)?;
                 print!("{}", args[0].to_string(self));
-                Ok(Value::Unit)
+                Ok(Gc::new(Value::Unit))
             }
             _ => unreachable!("invalid native function got called ({})", id),
         }
@@ -882,7 +892,7 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn rec_resolve(&mut self, name: Spur) -> RuntimeResult<Option<Value>> {
+    fn rec_resolve(&mut self, name: Spur) -> RuntimeResult<Option<Gc<Value>>> {
         for idx in (0..self.overlays.len()).rev() {
             let overlay = &mut self.overlays[idx];
             let expr = match overlay.values.get(&name) {
@@ -924,21 +934,25 @@ impl<'input> RuntimeCtx<'input> {
         Ok(None)
     }
 
-    fn resolve(&mut self, name: Spur) -> RuntimeResult<Option<Value>> {
+    fn resolve(&mut self, name: Spur) -> RuntimeResult<Option<Gc<Value>>> {
         if name == self.exit {
-            Ok(Some(Value::Int(
+            Ok(Some(Gc::new(Value::Int(
                 self.shell_ctx
                     .last_exit
                     .map(|v| v.code())
                     .flatten()
                     .unwrap_or(0) as i64,
-            )))
+            ))))
         } else {
             self.rec_resolve(name)
         }
     }
 
-    fn call_function(&mut self, function: &Value, args: Vec<Value>) -> RuntimeResult<Value> {
+    fn call_function(
+        &mut self,
+        function: &Value,
+        args: Vec<Gc<Value>>,
+    ) -> RuntimeResult<Gc<Value>> {
         match function {
             Value::Function(f) => self.call_function_value(f, args),
             val => {
@@ -949,7 +963,7 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
-    fn call_user_function(&mut self, id: usize, args: Vec<Value>) -> RuntimeResult<Value> {
+    fn call_user_function(&mut self, id: usize, args: Vec<Gc<Value>>) -> RuntimeResult<Gc<Value>> {
         let Self {
             closures,
             shell_ctx,
@@ -1009,23 +1023,23 @@ impl<'input> RuntimeCtx<'input> {
             }
         }
 
-        Ok(Value::Unit)
+        Ok(Gc::new(Value::Unit))
     }
 
     fn call_function_value(
         &mut self,
         function_value: &FunctionValue,
-        args: Vec<Value>,
-    ) -> RuntimeResult<Value> {
+        args: Vec<Gc<Value>>,
+    ) -> RuntimeResult<Gc<Value>> {
         match function_value {
             FunctionValue::NativeFn(id) => self.call_native_function(*id, args),
             FunctionValue::User(id) => self.call_user_function(*id, args),
         }
     }
 
-    fn eval_expr(&mut self, expr: &cow_ast::Expression<'input>) -> RuntimeResult<Value> {
+    fn eval_expr(&mut self, expr: &cow_ast::Expression<'input>) -> RuntimeResult<Gc<Value>> {
         match expr {
-            cow_ast::Expression::SubShell(code) => Ok(Value::Bytes(Rc::new(
+            cow_ast::Expression::SubShell(code) => Ok(Gc::new(Value::Bytes(Rc::new(
                 process::Command::new(std::env::current_exe()?)
                     .arg("builtin")
                     .arg("run-ast")
@@ -1033,15 +1047,15 @@ impl<'input> RuntimeCtx<'input> {
                     .arg(base64::encode(bincode::serialize(code)?))
                     .output()?
                     .stdout,
-            ))),
+            )))),
             cow_ast::Expression::Value(v) => match v {
-                cow_ast::Value::String(s) => Ok(Value::Str(Rc::from(s.to_string()))),
-                cow_ast::Value::Int(i) => Ok(Value::Int(*i)),
-                cow_ast::Value::List(l) => Ok(Value::List(Gc::new(
+                cow_ast::Value::String(s) => Ok(Gc::new(Value::Str(Rc::from(s.to_string())))),
+                cow_ast::Value::Int(i) => Ok(Gc::new(Value::Int(*i))),
+                cow_ast::Value::List(l) => Ok(Gc::new(Value::List(Gc::new(
                     l.iter()
                         .map(|expr| -> RuntimeResult<_> { Ok(GcCell::new(self.eval_expr(expr)?)) })
                         .collect::<RuntimeResult<_>>()?,
-                ))),
+                )))),
             },
             cow_ast::Expression::Call { function, args } => {
                 let function = self.eval_expr(function)?;
@@ -1067,7 +1081,9 @@ impl<'input> RuntimeCtx<'input> {
                     Some(function) => self.call_function(&function, args),
                 }
             }
-            cow_ast::Expression::Interpolated(i) => self.run_interpolation(i).map(Value::Str),
+            cow_ast::Expression::Interpolated(i) => {
+                self.run_interpolation(i).map(Value::Str).map(Gc::new)
+            }
             cow_ast::Expression::Variable(v) => self.resolve(*v)?.map(Ok).unwrap_or_else(|| {
                 Err(RuntimeError::Undefined(
                     self.shell_ctx
@@ -1115,7 +1131,20 @@ impl<'input> RuntimeCtx<'input> {
                     body: body.clone(),
                     captures,
                 });
-                Ok(Value::Function(FunctionValue::User(idx)))
+                Ok(Gc::new(Value::Function(FunctionValue::User(idx))))
+            }
+            cow_ast::Expression::Unwrap(v) => {
+                let val = self.eval_expr(v)?;
+                match &*val {
+                    Value::Option(o) => match o {
+                        Some(v) => Ok(v.clone()),
+                        None => Err(RuntimeError::UnwrapedNone),
+                    },
+                    invalid => Err(RuntimeError::UnexpectedType {
+                        expected: Type::Option(Box::new(Type::Dynamic)),
+                        got: invalid.ty(&self.closures, self.shell_ctx),
+                    }),
+                }
             }
         }
     }
@@ -1124,7 +1153,7 @@ impl<'input> RuntimeCtx<'input> {
         let ov = self.overlays.last_mut().unwrap();
         let ty = ov.types.get(&spur).unwrap_or(&Type::Dynamic);
         value.type_checks(ty, &self.closures, self.shell_ctx)?;
-        ov.values.insert(spur, value);
+        ov.values.insert(spur, Gc::new(value));
         Ok(())
     }
 

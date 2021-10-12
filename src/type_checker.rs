@@ -251,6 +251,13 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                 ret: Box::new(ret.clone()),
                 args: args.iter().map(|(_, t)| t.clone()).collect(),
             }),
+            cow_ast::Expression::Unwrap(v) => match self.check_expression(v)? {
+                crate::ast::Type::Option(o) => Ok(*o),
+                invalid => Err(vec![TypeError::Mismatch {
+                    expected: Type::Option(Box::new(Type::Dynamic)),
+                    got: invalid,
+                }]),
+            },
         }
     }
 
