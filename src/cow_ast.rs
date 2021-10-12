@@ -398,6 +398,11 @@ pub enum Expression<'input> {
     Interpolated(Vec<StringPart<'input>>),
     SubShell(Box<CommandContext<'input>>),
     Variable(Spur),
+    FuncDef {
+        args: Vec<(Spur, Type)>,
+        ret: Type,
+        body: Vec<Statement<'input>>,
+    },
 }
 
 impl<'a> Expression<'a> {
@@ -416,6 +421,11 @@ impl<'a> Expression<'a> {
             Expression::Interpolated(i) => Expression::Interpolated(convert_vec(i, |p| p.owned())),
             Expression::SubShell(ctx) => Expression::SubShell(Box::new(ctx.owned())),
             Expression::Variable(v) => Expression::Variable(v),
+            Expression::FuncDef { args, ret, body } => Expression::FuncDef {
+                args,
+                ret,
+                body: convert_vec(body, |s| s.owned()),
+            },
         }
     }
 }
@@ -440,6 +450,11 @@ impl<'a> Expression<'a> {
                 *c, sh_ctx,
             )?))),
             ast::Expression::Variable(v) => Ok(Self::Variable(v)),
+            ast::Expression::FuncDef { args, ret, body } => Ok(Self::FuncDef {
+                args,
+                ret,
+                body: try_convert_vec(body, |s| Statement::from_ast(s, sh_ctx))?,
+            }),
         }
     }
 }

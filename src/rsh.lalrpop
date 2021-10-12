@@ -30,6 +30,7 @@ extern {
 		"int" => lexer::Token::Int,
 		"str" => lexer::Token::Str,
 		"any" => lexer::Token::Any,
+		"fn" => lexer::Token::Fn,
 		">" => lexer::Token::OutRedir,
 		">>" => lexer::Token::AppendRedir,
 		"<" => lexer::Token::InRedir,
@@ -117,12 +118,21 @@ pub(crate) StrongExpression: Expression<'input> = {
 		args,
 	},
 	<id:Identifier> => Expression::Variable(id),
-}
+	"fn" "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:Script> "}" => Expression::FuncDef{args, ret: ret.unwrap_or(Type::Unit), body},
+};
+
+Ret: Type = {
+	"=>" <ty:Type> => ty, 
+};
+
+Arg: (Spur, Type) = {
+	<name:Identifier> <ty:(":" <Type>)?> => (name, ty.unwrap_or(Type::Dynamic)),
+};
 
 Call: Expression<'input> = {
 	<id:Identifier> => Expression::Variable(id),
 	"(" <e:StrongExpression> ")" => e,
-}
+};
 
 Redirection: (RedirectionType, Expression<'input>) = {
 	">" <v:Expression> => (RedirectionType::Out, v),
@@ -213,6 +223,20 @@ Statement: Statement<'input> = {
 	<CmdBlk> => Statement::Cmd{blk: <>, capture: None},
 	"capture" "(" <capture:Identifier> ")" <blk:CmdBlk> => Statement::Cmd{blk, capture: Some(capture)},
 	<e:StrongExpression> ";" => Statement::Expr(e),
+	"fn" <name:Identifier> "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:Script> "}" => Statement::VarDef(
+		VariableDefinition {
+			name,
+			ty: Type::Function { 
+				ret: Box::new(ret.clone().unwrap_or(Type::Unit)),
+				args: args.iter().map(|(_, t)| t.clone()).collect(),
+			},
+			expr: Expression::FuncDef {
+				ret: ret.unwrap_or(Type::Unit),
+				args, 
+				body,
+			},
+		}
+	),
 };
 
 StatementLine: Statement<'input> = {

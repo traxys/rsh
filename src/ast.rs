@@ -1,8 +1,9 @@
+use gc::{Finalize, Trace};
 use lasso::Spur;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Trace, Finalize)]
 pub enum RedirectionType {
     In,
     Out,
@@ -41,7 +42,7 @@ pub enum CommandChain<'input> {
     Pipeline(Pipeline<'input>),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Type {
     Dynamic,
     Int,
@@ -177,4 +178,9 @@ pub enum Expression<'input> {
     Interpolated(Cow<'input, str>),
     SubShell(Box<CommandContext<'input>>),
     Variable(Spur),
+    FuncDef {
+        args: Vec<(Spur, Type)>,
+        ret: Type,
+        body: Vec<Statement<'input>>,
+    },
 }

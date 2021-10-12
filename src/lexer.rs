@@ -31,6 +31,9 @@ pub enum Token<'input> {
     #[token("any", priority = 100)]
     #[display(fmt = "any")]
     Any,
+    #[token("fn", priority = 100)]
+    #[display(fmt = "fn")]
+    Fn,
     #[token(">")]
     #[display(fmt = ">")]
     OutRedir,

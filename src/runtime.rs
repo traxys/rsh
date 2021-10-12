@@ -72,23 +72,35 @@ enum PrivateValue {
 #[derive(Debug, Clone, Trace, Finalize)]
 enum FunctionValue {
     NativeFn(isize),
+    User(usize),
 }
 
 impl FunctionValue {
-    fn to_string(&self, sh_ctx: &mut ShellContext) -> String {
+    fn to_string(&self, rt_ctx: &mut RuntimeCtx) -> String {
         match self {
             FunctionValue::NativeFn(id) if *id >= 0 => {
-                format!("<native fn {}>", sh_ctx.builtins[*id as usize].name)
+                format!(
+                    "<native fn {}>",
+                    rt_ctx.shell_ctx.builtins[*id as usize].name
+                )
             }
             FunctionValue::NativeFn(id) => {
                 format!("<private native fn {}>", -id)
             }
+            FunctionValue::User(_) => todo!(),
         }
     }
 
-    fn ty(&self, sh_ctx: &mut ShellContext) -> Type {
+    fn ty(&self, closures: &[Closure], sh_ctx: &mut ShellContext) -> Type {
         match self {
             FunctionValue::NativeFn(x) => sh_ctx.builtins[*x as usize].ty(),
+            FunctionValue::User(id) => {
+                let f = &closures[*id];
+                Type::Function {
+                    ret: Box::new(f.ret.clone()),
+                    args: f.args.iter().map(|(_, t)| t.clone()).collect(),
+                }
+            }
         }
     }
 }
@@ -127,12 +139,16 @@ macro_rules! as_ty {
     (fn $name:ident -> $ret_ty:ty {
         $variant:ident | expected $expected:expr
     }) => {
-        pub(crate) fn $name(&self, sh_ctx: &mut ShellContext) -> RuntimeResult<&$ret_ty> {
+        pub(crate) fn $name(
+            &self,
+            closures: &[Closure],
+            sh_ctx: &mut ShellContext,
+        ) -> RuntimeResult<&$ret_ty> {
             match self {
                 Value::$variant(v) => Ok(v),
                 v => Err(RuntimeError::UnexpectedType {
                     expected: $expected,
-                    got: v.ty(sh_ctx),
+                    got: v.ty(closures, sh_ctx),
                 }),
             }
         }
@@ -141,12 +157,16 @@ macro_rules! as_ty {
     (fn mut $name:ident -> $ret_ty:ty {
         $variant:ident | expected $expected:expr
     }) => {
-        pub(crate) fn $name(&mut self, sh_ctx: &mut ShellContext) -> RuntimeResult<&mut $ret_ty> {
+        pub(crate) fn $name(
+            &mut self,
+            closures: &[Closure],
+            sh_ctx: &mut ShellContext,
+        ) -> RuntimeResult<&mut $ret_ty> {
             match self {
                 Value::$variant(v) => Ok(v),
                 v => Err(RuntimeError::UnexpectedType {
                     expected: $expected,
-                    got: v.ty(sh_ctx),
+                    got: v.ty(closures, sh_ctx),
                 }),
             }
         }
@@ -154,31 +174,31 @@ macro_rules! as_ty {
 }
 
 impl Value {
-    pub fn to_string(&self, sh_ctx: &mut ShellContext) -> Rc<String> {
+    pub fn to_string(&self, rt_ctx: &mut RuntimeCtx) -> Rc<String> {
         match self {
             Value::Str(v) => v.clone(),
             Value::Int(i) => i.to_string().into(),
             Value::Bytes(v) => String::from_utf8_lossy(v).to_string().into(),
             Value::List(l) => match l.as_slice() {
                 [] => "[]".to_owned().into(),
-                [x] => format!("[{}]", x.borrow().to_string(sh_ctx)).into(),
+                [x] => format!("[{}]", x.borrow().to_string(rt_ctx)).into(),
                 [x, rest @ ..] => {
-                    let mut str = format!("[{}", x.borrow().to_string(sh_ctx));
+                    let mut str = format!("[{}", x.borrow().to_string(rt_ctx));
                     for elem in rest.iter() {
                         str += ",";
-                        str += &*elem.borrow().to_string(sh_ctx);
+                        str += &*elem.borrow().to_string(rt_ctx);
                     }
                     str += "]";
                     str.into()
                 }
             },
             Value::Option(None) => "None".to_owned().into(),
-            Value::Option(Some(v)) => format!("Some({})", v.to_string(sh_ctx)).into(),
-            Value::Function(f) => f.to_string(sh_ctx).into(),
+            Value::Option(Some(v)) => format!("Some({})", v.to_string(rt_ctx)).into(),
+            Value::Function(f) => f.to_string(rt_ctx).into(),
             Value::Iterator(IteratorValue { value, next }) => format!(
                 "iterator{{value:{},next:{}}}",
-                value.borrow().to_string(sh_ctx),
-                next.to_string(sh_ctx)
+                value.borrow().to_string(rt_ctx),
+                next.to_string(rt_ctx)
             )
             .into(),
             Value::Private(_) => "<private>".to_owned().into(),
@@ -186,34 +206,41 @@ impl Value {
         }
     }
 
-    pub fn ty(&self, sh_ctx: &mut ShellContext) -> Type {
+    pub fn ty(&self, closures: &[Closure], sh_ctx: &mut ShellContext) -> Type {
         match self {
             Value::Str(_) => Type::String,
             Value::Int(_) => Type::Int,
             Value::Bytes(_) => Type::Bytes,
             Value::Option(None) => Type::Option(Box::new(Type::Dynamic)),
-            Value::Option(Some(v)) => Type::Option(Box::new(v.ty(sh_ctx))),
+            Value::Option(Some(v)) => Type::Option(Box::new(v.ty(closures, sh_ctx))),
             Value::List(l) => {
                 if l.is_empty() {
                     Type::List(Box::new(Type::Dynamic))
                 } else {
-                    let ty = l.first().unwrap().borrow().ty(sh_ctx);
+                    let ty = l.first().unwrap().borrow().ty(closures, sh_ctx);
                     for v in l.iter().skip(1) {
-                        if ty.is_compatible(&v.borrow().ty(sh_ctx)) != TypeCheck::Compatible {
+                        if ty.is_compatible(&v.borrow().ty(closures, sh_ctx))
+                            != TypeCheck::Compatible
+                        {
                             return Type::List(Box::new(Type::Dynamic));
                         }
                     }
                     Type::List(Box::new(ty))
                 }
             }
-            Value::Function(f) => f.ty(sh_ctx),
+            Value::Function(f) => f.ty(closures, sh_ctx),
             Value::Iterator { .. } => todo!(),
             Value::Private(_) => Type::Private,
             Value::Unit => Type::Unit,
         }
     }
 
-    pub fn type_checks(&self, ty: &Type, sh_ctx: &mut ShellContext) -> RuntimeResult<()> {
+    pub fn type_checks(
+        &self,
+        ty: &Type,
+        closures: &[Closure],
+        sh_ctx: &mut ShellContext,
+    ) -> RuntimeResult<()> {
         match (self, ty) {
             (_, Type::Dynamic) => Ok(()),
             (Value::Str(_), Type::String) => Ok(()),
@@ -221,31 +248,60 @@ impl Value {
             (Value::Bytes(_), Type::String | Type::Bytes) => Ok(()),
             (Value::Unit, Type::Unit) => Ok(()),
             (Value::Option(inner), Type::Option(inner_ty)) => match inner {
-                Some(inner) => inner.type_checks(&inner_ty, sh_ctx),
+                Some(inner) => inner.type_checks(&inner_ty, closures, sh_ctx),
                 None => Ok(()),
             },
             (Value::Private(_), _) => todo!(),
-            (Value::Function(_), Type::Function { .. }) => todo!(),
+            (Value::Function(f), Type::Function { ret, args }) => {
+                let (vret, vargs) = match f.ty(closures, sh_ctx) {
+                    Type::Function { ret, args } => (ret, args),
+                    _ => unreachable!(),
+                };
+                if (**ret != Type::Dynamic && *vret != **ret)
+                    || args.len() != vargs.len()
+                    || args
+                        .iter()
+                        .zip(&vargs)
+                        .any(|(t, vt)| *vt != Type::Dynamic && *vt != *t)
+                {
+                    Err(RuntimeError::UnexpectedType {
+                        expected: Type::Function {
+                            ret: ret.clone(),
+                            args: args.clone(),
+                        },
+                        got: Type::Function {
+                            ret: vret,
+                            args: vargs,
+                        },
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             (Value::List(l), Type::List(l_ty)) => {
                 for x in l.iter() {
-                    x.borrow().type_checks(l_ty, sh_ctx)?;
+                    x.borrow().type_checks(l_ty, closures, sh_ctx)?;
                 }
                 Ok(())
             }
             (Value::Iterator(_), Type::Iterator(_)) => todo!(),
             (_, _) => Err(RuntimeError::UnexpectedType {
                 expected: ty.clone(),
-                got: self.ty(sh_ctx),
+                got: self.ty(closures, sh_ctx),
             }),
         }
     }
 
-    pub(crate) fn as_int(&self, sh_ctx: &mut ShellContext) -> RuntimeResult<i64> {
+    pub(crate) fn as_int(
+        &self,
+        closures: &[Closure],
+        sh_ctx: &mut ShellContext,
+    ) -> RuntimeResult<i64> {
         match self {
             Value::Int(i) => Ok(*i),
             v => Err(RuntimeError::UnexpectedType {
                 expected: Type::Int,
-                got: v.ty(sh_ctx),
+                got: v.ty(closures, sh_ctx),
             }),
         }
     }
@@ -267,9 +323,24 @@ impl Value {
     });
 }
 
+struct Closure<'input> {
+    ret: Type,
+    args: Vec<(Spur, Type)>,
+    body: Vec<Statement<'input>>,
+    captures: Vec<(Spur, Value)>,
+}
+
+#[derive(Debug)]
+enum StatementExec {
+    NoAction,
+    Return(Value),
+}
+
+// TODO: fix leak of closures
 pub struct RuntimeCtx<'input> {
     pub shell_ctx: &'input mut ShellContext,
     overlays: Vec<Overlay<'input>>,
+    closures: Vec<Closure<'input>>,
     exit: Spur,
 }
 
@@ -297,6 +368,150 @@ fn root_overlay<'input>(sh_ctx: &mut ShellContext) -> Overlay<'input> {
     }
 }
 
+struct CaptureCtx {
+    defined: Vec<HashSet<Spur>>,
+    undefined: HashSet<Spur>,
+}
+
+impl CaptureCtx {
+    fn process_id(&mut self, name: Spur) {
+        if !self.defined.iter().any(|set| set.contains(&name)) {
+            self.undefined.insert(name);
+        }
+    }
+
+    fn process_body(&mut self, body: &[Statement]) {
+        for stmt in body {
+            self.process_statement(stmt);
+        }
+    }
+
+    fn process_statement(&mut self, statement: &Statement) {
+        match statement {
+            Statement::VarDef(def) => {
+                self.defined.last_mut().unwrap().insert(def.name);
+            }
+            Statement::Cmd { blk, capture } => {
+                self.defined.push(HashSet::new());
+                for stmt in blk {
+                    self.process_command_statement(stmt);
+                }
+                self.defined.pop();
+
+                if let Some(cpt) = capture {
+                    self.defined.last_mut().unwrap().insert(*cpt);
+                }
+            }
+            Statement::Expr(e) => self.process_expr(e),
+        }
+    }
+
+    fn process_command_statement(&mut self, cmd_stmt: &cow_ast::CommandStatement) {
+        match cmd_stmt {
+            cow_ast::CommandStatement::Definitions(defs) => self.process_defs(defs),
+            cow_ast::CommandStatement::Commands(cmd) => self.process_cmd_ctx(cmd),
+        }
+    }
+
+    fn process_defs(&mut self, defs: &[cow_ast::VariableDefinition]) {
+        self.defined
+            .last_mut()
+            .unwrap()
+            .extend(defs.iter().map(|def| def.name));
+        for def in defs {
+            self.process_expr(&def.expr);
+        }
+    }
+
+    fn process_cmd_ctx(&mut self, cmd_ctx: &cow_ast::CommandContext) {
+        self.defined.push(HashSet::new());
+        self.process_defs(&cmd_ctx.variables);
+        for chain in &cmd_ctx.commands {
+            self.process_cmd_chain(chain);
+        }
+        self.defined.pop();
+    }
+
+    fn process_cmd_chain(&mut self, chain: &cow_ast::CommandChain) {
+        match chain {
+            cow_ast::CommandChain::Or(part, chain) | cow_ast::CommandChain::And(part, chain) => {
+                self.process_part(part);
+                self.process_cmd_chain(chain);
+            }
+            cow_ast::CommandChain::Pipeline(pipeline) => self.process_pipeline(pipeline),
+        }
+    }
+
+    fn process_part(&mut self, part: &cow_ast::ChainPart) {
+        match part {
+            cow_ast::ChainPart::Pipeline(p) => self.process_pipeline(p),
+            cow_ast::ChainPart::Chain(c) => self.process_cmd_chain(c),
+        }
+    }
+
+    fn process_pipeline(&mut self, pipeline: &cow_ast::Pipeline) {
+        for cmd in &pipeline.commands {
+            self.process_command(cmd);
+        }
+    }
+
+    fn process_command(&mut self, command: &cow_ast::Command) {
+        self.process_expr(&command.name);
+        for arg in &command.args {
+            self.process_expr(arg);
+        }
+        for (_, redir) in &command.redirections {
+            self.process_expr(redir);
+        }
+    }
+
+    fn process_expr(&mut self, expr: &cow_ast::Expression) {
+        match expr {
+            cow_ast::Expression::Value(v) => match v {
+                cow_ast::Value::String(_) => (),
+                cow_ast::Value::Int(_) => (),
+                cow_ast::Value::List(l) => {
+                    for expr in l {
+                        self.process_expr(expr);
+                    }
+                }
+            },
+            cow_ast::Expression::Call { function, args } => {
+                self.process_expr(function);
+                for arg in args {
+                    self.process_expr(arg);
+                }
+            }
+            cow_ast::Expression::Method { value, name, args } => {
+                self.process_id(*name);
+                self.process_expr(value);
+                for arg in args {
+                    self.process_expr(arg);
+                }
+            }
+            cow_ast::Expression::Interpolated(parts) => self.process_string_parts(parts),
+            cow_ast::Expression::SubShell(cmd_ctx) => self.process_cmd_ctx(cmd_ctx),
+            cow_ast::Expression::Variable(name) => self.process_id(*name),
+            cow_ast::Expression::FuncDef { args, ret: _, body } => {
+                self.defined
+                    .push(args.iter().map(|(name, _)| *name).collect());
+                self.process_body(body);
+                self.defined.pop();
+            }
+        }
+    }
+
+    fn process_string_parts(&mut self, parts: &[cow_ast::StringPart]) {
+        for part in parts {
+            match part {
+                cow_ast::StringPart::Text(_) => (),
+                cow_ast::StringPart::Variable(n) => self.process_id(*n),
+                cow_ast::StringPart::Expression(e) => self.process_expr(e),
+            }
+        }
+    }
+}
+
 impl<'input> RuntimeCtx<'input> {
     fn call_native_function(&mut self, id: isize, args: Vec<Value>) -> RuntimeResult<Value> {
         fn check_args(expected: usize, args: &[Value]) -> RuntimeResult<()> {
@@ -314,9 +529,9 @@ impl<'input> RuntimeCtx<'input> {
             // Negative index are private non named functions
             // increment range iterator and return value
             -1 => {
-                let it = args[0].as_iter(self.shell_ctx)?;
+                let it = args[0].as_iter(&self.closures, self.shell_ctx)?;
                 let mut value = it.value.borrow_mut();
-                match value.as_priv_mut(self.shell_ctx)? {
+                match value.as_priv_mut(&self.closures, self.shell_ctx)? {
                     PrivateValue::Range { start, end } if *start < *end => {
                         let ret = *start;
                         *start += 1;
@@ -328,13 +543,13 @@ impl<'input> RuntimeCtx<'input> {
             // s
             0 => {
                 check_args(1, &args)?;
-                Ok(Value::Str(args[0].to_string(self.shell_ctx)))
+                Ok(Value::Str(args[0].to_string(self)))
             }
             // env =>
             1 => {
                 check_args(2, &args)?;
-                let name = args[0].as_str(self.shell_ctx)?;
-                let val = args[1].as_str(self.shell_ctx)?;
+                let name = args[0].as_str(&self.closures, self.shell_ctx)?;
+                let val = args[1].as_str(&self.closures, self.shell_ctx)?;
                 std::env::set_var(name, val);
                 Ok(args.into_iter().nth(1).unwrap())
             }
@@ -346,8 +561,8 @@ impl<'input> RuntimeCtx<'input> {
             // range
             3 => {
                 check_args(2, &args)?;
-                let start = args[0].as_int(self.shell_ctx)?;
-                let end = args[1].as_int(self.shell_ctx)?;
+                let start = args[0].as_int(&self.closures, self.shell_ctx)?;
+                let end = args[1].as_int(&self.closures, self.shell_ctx)?;
                 let range = Value::Private(PrivateValue::Range { start, end });
                 Ok(Value::Iterator(IteratorValue {
                     value: Gc::new(GcCell::new(range)),
@@ -357,7 +572,7 @@ impl<'input> RuntimeCtx<'input> {
             // next
             4 => {
                 check_args(1, &args)?;
-                let it = args[0].as_iter(self.shell_ctx)?;
+                let it = args[0].as_iter(&self.closures, self.shell_ctx)?;
                 let next = self.call_function_value(&it.next, vec![args[0].clone()]);
                 next
             }
@@ -365,7 +580,7 @@ impl<'input> RuntimeCtx<'input> {
             // TODO: capture print when required
             5 => {
                 check_args(1, &args)?;
-                print!("{}", args[0].to_string(self.shell_ctx));
+                print!("{}", args[0].to_string(self));
                 Ok(Value::Unit)
             }
             _ => unreachable!("invalid native function got called ({})", id),
@@ -376,6 +591,7 @@ impl<'input> RuntimeCtx<'input> {
         Self {
             exit: shell_ctx.rodeo.get_or_intern_static("exit"),
             overlays: vec![root_overlay(shell_ctx)],
+            closures: Vec::new(),
             shell_ctx,
         }
     }
@@ -426,16 +642,17 @@ impl<'input> RuntimeCtx<'input> {
         &mut self,
         command: &cow_ast::Command<'input>,
     ) -> RuntimeResult<process::Command> {
-        let name = self.eval_expr(&command.name)?.to_string(self.shell_ctx);
+        let name = self.eval_expr(&command.name)?.to_string(self);
         if &*name == "exit" {
             if command.args.len() > 1 {
                 return Err(RuntimeError::Exit(255));
             }
 
-            match command.args.first().map(|v| {
-                self.eval_expr(v)
-                    .map(|v| v.to_string(self.shell_ctx).parse())
-            }) {
+            match command
+                .args
+                .first()
+                .map(|v| self.eval_expr(v).map(|v| v.to_string(self).parse()))
+            {
                 Some(Ok(Ok(e))) => return Err(RuntimeError::Exit(e)),
                 Some(Err(e)) => return Err(e),
                 _ => return Err(RuntimeError::Exit(255)),
@@ -453,12 +670,12 @@ impl<'input> RuntimeCtx<'input> {
         let args: Vec<_> = command
             .args
             .iter()
-            .map(|v| self.eval_expr(v).map(|v| v.to_string(self.shell_ctx)))
+            .map(|v| self.eval_expr(v).map(|v| v.to_string(self)))
             .collect::<RuntimeResult<_>>()?;
         cmd.args(args.iter().map(|x| x.as_ref()));
 
         for (ty, path) in &command.redirections {
-            let path = self.eval_expr(&path)?.to_string(self.shell_ctx);
+            let path = self.eval_expr(&path)?.to_string(self);
             match ty {
                 RedirectionType::In => {
                     let file = File::open(&*path)?;
@@ -630,9 +847,7 @@ impl<'input> RuntimeCtx<'input> {
         match fstring {
             [cow_ast::StringPart::Text(v)] => Ok(Rc::from(v.to_string())),
             [cow_ast::StringPart::Variable(v)] => self.resolve_text(*v),
-            [cow_ast::StringPart::Expression(e)] => {
-                Ok(self.eval_expr(e)?.to_string(self.shell_ctx))
-            }
+            [cow_ast::StringPart::Expression(e)] => Ok(self.eval_expr(e)?.to_string(self)),
             _ => fstring
                 .iter()
                 .try_fold(String::new(), |mut current, segment| -> RuntimeResult<_> {
@@ -642,7 +857,7 @@ impl<'input> RuntimeCtx<'input> {
                             current.push_str(&self.resolve_text(*v)?)
                         }
                         cow_ast::StringPart::Expression(e) => {
-                            current.push_str(&self.eval_expr(e)?.to_string(self.shell_ctx))
+                            current.push_str(&self.eval_expr(e)?.to_string(self))
                         }
                     }
                     Ok(current)
@@ -663,7 +878,7 @@ impl<'input> RuntimeCtx<'input> {
                 );
                 Ok("".to_owned().into())
             }
-            Some(v) => Ok(v.to_string(self.shell_ctx)),
+            Some(v) => Ok(v.to_string(self)),
         }
     }
 
@@ -700,7 +915,7 @@ impl<'input> RuntimeCtx<'input> {
             let overlay = &mut self.overlays[idx];
             overlay.currently_evaluating.remove(&name);
             let ty = overlay.types.get(&name).unwrap_or(&Type::Dynamic);
-            val.type_checks(ty, self.shell_ctx)?;
+            val.type_checks(ty, &self.closures, self.shell_ctx)?;
             overlay.values.insert(name, val.clone());
             return Ok(Some(val));
         }
@@ -726,8 +941,75 @@ impl<'input> RuntimeCtx<'input> {
     fn call_function(&mut self, function: &Value, args: Vec<Value>) -> RuntimeResult<Value> {
         match function {
             Value::Function(f) => self.call_function_value(f, args),
-            val => return Err(RuntimeError::UncallableType(val.ty(self.shell_ctx))),
+            val => {
+                return Err(RuntimeError::UncallableType(
+                    val.ty(&self.closures, self.shell_ctx),
+                ))
+            }
         }
+    }
+
+    fn call_user_function(&mut self, id: usize, args: Vec<Value>) -> RuntimeResult<Value> {
+        let Self {
+            closures,
+            shell_ctx,
+            ..
+        } = self;
+        let f = &closures[id];
+        if f.args.len() != args.len() {
+            return Err(RuntimeError::InvalidArgCount {
+                expected: f.args.len(),
+                got: args.len(),
+            });
+        };
+        let (values, types) = f.args.iter().zip(&args).try_fold(
+            (
+                HashMap::with_capacity(args.len()),
+                HashMap::with_capacity(args.len()),
+            ),
+            |(mut vals, mut tys), ((name, ty), val)| -> RuntimeResult<_> {
+                val.type_checks(&ty, closures, shell_ctx)?;
+                vals.insert(*name, val.clone());
+                tys.insert(*name, ty.clone());
+                Ok((vals, tys))
+            },
+        )?;
+
+        let args_overlay = Overlay {
+            definitions: HashMap::new(),
+            values,
+            types,
+            currently_evaluating: HashSet::new(),
+        };
+
+        let (types, values) = f
+            .captures
+            .iter()
+            .map(|(name, val)| ((*name, val.ty(&closures, shell_ctx)), (*name, val.clone())))
+            .unzip();
+
+        let capture_overlay = Overlay {
+            definitions: HashMap::new(),
+            values,
+            types,
+            currently_evaluating: HashSet::new(),
+        };
+
+        let mut func_ctx = RuntimeCtx {
+            shell_ctx: self.shell_ctx,
+            overlays: vec![capture_overlay, args_overlay],
+            closures: Vec::new(),
+            exit: self.exit,
+        };
+
+        for statement in &f.body {
+            match func_ctx.run_statement(statement)? {
+                StatementExec::NoAction => (),
+                StatementExec::Return(_) => todo!(),
+            }
+        }
+
+        Ok(Value::Unit)
     }
 
     fn call_function_value(
@@ -737,6 +1019,7 @@ impl<'input> RuntimeCtx<'input> {
     ) -> RuntimeResult<Value> {
         match function_value {
             FunctionValue::NativeFn(id) => self.call_native_function(*id, args),
+            FunctionValue::User(id) => self.call_user_function(*id, args),
         }
     }
 
@@ -794,25 +1077,65 @@ impl<'input> RuntimeCtx<'input> {
                         .to_owned(),
                 ))
             }),
+            cow_ast::Expression::FuncDef { args, ret, body } => {
+                let idx = self.closures.len();
+
+                let mut capture_ctx = CaptureCtx {
+                    defined: vec![args.iter().map(|(name, _)| *name).collect()],
+                    undefined: HashSet::new(),
+                };
+
+                capture_ctx.process_body(body);
+
+                let captures = capture_ctx
+                    .undefined
+                    .into_iter()
+                    .map(|name| -> RuntimeResult<_> {
+                        Ok((
+                            name,
+                            match self.rec_resolve(name)? {
+                                Some(v) => v,
+                                None => {
+                                    return Err(RuntimeError::Undefined(
+                                        self.shell_ctx
+                                            .rodeo
+                                            .try_resolve(&name)
+                                            .unwrap_or("<unkown>")
+                                            .to_owned(),
+                                    ))
+                                }
+                            },
+                        ))
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                self.closures.push(Closure {
+                    ret: ret.clone(),
+                    args: args.clone(),
+                    body: body.clone(),
+                    captures,
+                });
+                Ok(Value::Function(FunctionValue::User(idx)))
+            }
         }
     }
 
     fn set_value(&mut self, spur: Spur, value: Value) -> RuntimeResult<()> {
         let ov = self.overlays.last_mut().unwrap();
         let ty = ov.types.get(&spur).unwrap_or(&Type::Dynamic);
-        value.type_checks(ty, self.shell_ctx)?;
+        value.type_checks(ty, &self.closures, self.shell_ctx)?;
         ov.values.insert(spur, value);
         Ok(())
     }
 
-    pub fn run_statement(&mut self, statement: Statement<'input>) -> RuntimeResult<()> {
+    fn run_statement(&mut self, statement: &Statement<'input>) -> RuntimeResult<StatementExec> {
         match statement {
             Statement::VarDef(v) => {
-                self.enter_single_overlay(v);
+                self.enter_single_overlay(v.clone());
             }
             Statement::Cmd { blk, capture: None } => {
                 for cmd in blk {
-                    self.run_cmd_stmt(cmd, None)?;
+                    self.run_cmd_stmt(cmd.clone(), None)?;
                 }
             }
             Statement::Cmd {
@@ -821,14 +1144,22 @@ impl<'input> RuntimeCtx<'input> {
             } => {
                 let mut output = Vec::new();
                 for cmd in blk {
-                    self.run_cmd_stmt(cmd, Some(&mut output))?;
+                    self.run_cmd_stmt(cmd.clone(), Some(&mut output))?;
                 }
-                self.set_value(var, Value::Bytes(Rc::new(output)))?;
+                self.set_value(*var, Value::Bytes(Rc::new(output)))?;
             }
             Statement::Expr(e) => {
                 self.eval_expr(&e)?;
             }
         }
+        Ok(StatementExec::NoAction)
+    }
+
+    pub fn run_script(&mut self, script: &[Statement<'input>]) -> RuntimeResult<()> {
+        for stmt in script {
+            self.run_statement(stmt)?;
+        }
+
         Ok(())
     }
 }

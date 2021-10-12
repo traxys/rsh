@@ -291,15 +291,16 @@ fn main() -> color_eyre::Result<()> {
         let parsed =
             report!(rsh::ScriptParser::new().parse(&mut shell_ctx, script, lexer::lexer(&script)));
         let mut rt_ctx = RuntimeCtx::new(&mut shell_ctx);
-        for stmt in parsed {
-            let stmt = cow_ast::Statement::from_ast(stmt, rt_ctx.shell_ctx)?;
-            match rt_ctx.run_statement(stmt) {
-                Ok(_) => (),
-                Err(RuntimeError::Exit(i)) => process::exit(i),
-                Err(e) => {
-                    eprintln!("Error executing script: {}", e);
-                    process::exit(1);
-                }
+        let parsed = parsed
+            .into_iter()
+            .map(|s| cow_ast::Statement::from_ast(s, rt_ctx.shell_ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        match rt_ctx.run_script(&parsed) {
+            Ok(_) => (),
+            Err(RuntimeError::Exit(i)) => process::exit(i),
+            Err(e) => {
+                eprintln!("Error executing script: {}", e);
+                process::exit(1);
             }
         }
 
