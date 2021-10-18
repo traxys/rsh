@@ -143,6 +143,10 @@ pub enum Statement<'input> {
         blk: Vec<CommandStatement<'input>>,
         capture: Option<Spur>,
     },
+    Assign {
+        lhs: Expression<'input>,
+        rhs: Expression<'input>,
+    },
     #[serde(borrow)]
     Expr(Expression<'input>),
 }

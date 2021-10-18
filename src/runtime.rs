@@ -44,6 +44,8 @@ pub enum RuntimeError {
     UnexpectedError(String),
     #[error("tried to unwrap None")]
     UnwrapedNone,
+    #[error("expression is not assignable")]
+    Unasignable,
 }
 
 #[derive(Debug, Clone, Trace, Finalize)]
@@ -419,6 +421,10 @@ impl CaptureCtx {
                 }
             }
             Statement::Expr(e) => self.process_expr(e),
+            Statement::Assign { lhs, rhs } => {
+                self.process_expr(rhs);
+                self.process_expr(lhs);
+            }
         }
     }
 
@@ -1234,8 +1240,54 @@ impl<'input> RuntimeCtx<'input> {
             Statement::Expr(e) => {
                 self.eval_expr(&e)?;
             }
+            Statement::Assign { lhs, rhs } => {
+                let value = self.eval_expr(rhs)?;
+                self.assign(lhs, value)?;
+            }
         }
         Ok(StatementExec::NoAction)
+    }
+
+    fn assign(
+        &mut self,
+        expr: &cow_ast::Expression<'input>,
+        value: Gc<Value>,
+    ) -> RuntimeResult<()> {
+        match expr {
+            cow_ast::Expression::Variable(name) => self.assign_var(*name, value),
+            cow_ast::Expression::Call { .. } => todo!(),
+            cow_ast::Expression::Method { .. } => todo!(),
+            cow_ast::Expression::Unwrap(_) => todo!(),
+            cow_ast::Expression::Cond { .. } => todo!(),
+            cow_ast::Expression::Value(_)
+            | cow_ast::Expression::SubShell(_)
+            | cow_ast::Expression::Interpolated(_)
+            | cow_ast::Expression::FuncDef { .. } => Err(RuntimeError::Unasignable),
+        }
+    }
+
+    fn assign_var(&mut self, var: Spur, value: Gc<Value>) -> RuntimeResult<()> {
+        for ov in self.overlays.iter_mut().rev() {
+            match ov.values.get_mut(&var) {
+                Some(v) => {
+                    *v = value;
+                    return Ok(());
+                }
+                None if ov.definitions.contains_key(&var) => {
+                    ov.values.insert(var, value);
+                    return Ok(());
+                }
+                None => (),
+            }
+        }
+
+        Err(RuntimeError::Undefined(
+            self.shell_ctx
+                .rodeo
+                .try_resolve(&var)
+                .unwrap_or("<unkown>")
+                .to_owned(),
+        ))
     }
 
     pub fn run_script(&mut self, script: &[Statement<'input>]) -> RuntimeResult<()> {

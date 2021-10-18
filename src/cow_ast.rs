@@ -326,6 +326,10 @@ pub enum Statement<'input> {
         blk: Vec<CommandStatement<'input>>,
         capture: Option<Spur>,
     },
+    Assign {
+        lhs: Expression<'input>,
+        rhs: Expression<'input>,
+    },
     #[serde(borrow)]
     Expr(Expression<'input>),
 }
@@ -339,6 +343,10 @@ impl<'a> Statement<'a> {
                 blk: convert_vec(blk, |c| c.owned()),
             },
             Statement::Expr(e) => Statement::Expr(e.owned()),
+            Statement::Assign { lhs, rhs } => Statement::Assign {
+                lhs: lhs.owned(),
+                rhs: rhs.owned(),
+            },
         }
     }
 
@@ -350,6 +358,10 @@ impl<'a> Statement<'a> {
                 capture,
             }),
             ast::Statement::Expr(e) => Ok(Self::Expr(Expression::from_ast(e, sh_ctx)?)),
+            ast::Statement::Assign { lhs, rhs } => Ok(Self::Assign {
+                lhs: Expression::from_ast(lhs, sh_ctx)?,
+                rhs: Expression::from_ast(rhs, sh_ctx)?,
+            }),
         }
     }
 }

@@ -261,6 +261,11 @@ Statement: Statement<'input> = {
 			},
 		}
 	),
+	<lhs:StrongExpression> "=" <rhs:StrongExpression> ";" => 
+		Statement::Assign {
+			lhs,
+			rhs,
+		}
 };
 
 StatementLine: Option<Statement<'input>> = {
