@@ -50,6 +50,7 @@ pub enum Type {
     Bytes,
     Private,
     Unit,
+    Bool,
     Function { ret: Box<Type>, args: Vec<Type> },
     List(Box<Type>),
     Iterator(Box<Type>),
@@ -103,6 +104,7 @@ impl std::fmt::Display for Type {
             Type::Iterator(item) => write!(f, "Iterator<{}>", item),
             Type::Option(item) => write!(f, "Option<{}>", item),
             Type::Unit => write!(f, "()"),
+            Type::Bool => write!(f, "bool"),
         }
     }
 }
@@ -150,6 +152,7 @@ pub enum Value<'input> {
     String(Cow<'input, str>),
     Int(i64),
     List(Vec<Expression<'input>>),
+    Bool(bool),
 }
 
 impl<'input> Value<'input> {
@@ -158,6 +161,7 @@ impl<'input> Value<'input> {
             Value::String(_) => Type::String,
             Value::Int(_) => Type::Int,
             Value::List(_) => Type::List(Box::new(Type::Dynamic)),
+            Value::Bool(_) => Type::Bool,
         }
     }
 }
@@ -181,20 +185,29 @@ pub enum Expression<'input> {
     FuncDef {
         args: Vec<(Spur, Type)>,
         ret: Type,
-        body: Vec<Statement<'input>>,
-        retexpr: Option<Box<Expression<'input>>>,
+        body: StatementGroup<'input>,
     },
     #[serde(borrow)]
     Unwrap(Box<Expression<'input>>),
+    Cond {
+        cond: Box<Expression<'input>>,
+        br_if: StatementGroup<'input>,
+        br_else: StatementGroup<'input>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatementGroup<'input> {
+    #[serde(borrow)]
+    pub group: Vec<Statement<'input>>,
+    #[serde(borrow)]
+    pub ret: Option<Box<Expression<'input>>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Branch<'input> {
-    If {
-        #[serde(borrow)]
-        if_branch: Vec<Statement<'input>>,
-        #[serde(borrow)]
-        else_branch: Option<Vec<Statement<'input>>>,
-    },
+    #[serde(borrow)]
+    If(Vec<Statement<'input>>),
+    #[serde(borrow)]
     Loop(Vec<Statement<'input>>),
 }

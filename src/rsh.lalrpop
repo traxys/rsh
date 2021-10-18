@@ -14,6 +14,7 @@ use crate::{
 		Value,
 		Expression,
 		Statement,
+		StatementGroup,
 		CommandStatement,
 	}
 };
@@ -25,6 +26,9 @@ extern {
 	type Error = LexerError;
 
 	enum lexer::Token<'input> {
+		"true" => lexer::Token::True,
+		"false" => lexer::Token::False,
+		"bool" => lexer::Token::Bool,
 		"let" => lexer::Token::Let,
 		"in" => lexer::Token::In,
 		"int" => lexer::Token::Int,
@@ -72,6 +76,8 @@ Comma<T>: Vec<T> = { // (1)
 };
 
 Value: Value<'input> = {
+	"true" => Value::Bool(true),
+	"false" => Value::Bool(false),
 	str => Value::String(<>),
 	int => Value::Int(<>),
 	"[" <exprs:Comma<StrongExpression>> "]" => Value::List(exprs),
@@ -123,8 +129,7 @@ pub(crate) StrongExpression: Expression<'input> = {
 		Expression::FuncDef {
 			args, 
 			ret: ret.unwrap_or(Type::Unit), 
-			body: body.0,
-			retexpr: body.1.map(Box::new),
+			body,
 		},
 	<expr:StrongExpression> "!" => Expression::Unwrap(Box::new(expr)),
 };
@@ -181,6 +186,7 @@ Type: Type = {
 	"int" => Type::Int,
 	"any" => Type::Dynamic,
 	"str" => Type::String,
+	"bool" => Type::Bool,
 	"[" <ty:Type> "]" => Type::List(Box::new(ty)),
 };
 
@@ -242,8 +248,7 @@ Statement: Statement<'input> = {
 			expr: Expression::FuncDef {
 				ret: ret.unwrap_or(Type::Unit),
 				args, 
-				body: body.0,
-				retexpr: body.1.map(Box::new),
+				body,
 			},
 		}
 	),
@@ -254,8 +259,11 @@ StatementLine: Option<Statement<'input>> = {
 	<s:Statement> => Some(s),
 };
 
-ExpressionGroup: (Vec<Statement<'input>>, Option<Expression<'input>>) = {
-	<group:StatementGroup> <expr:StrongExpression?> => (group, expr),
+ExpressionGroup: StatementGroup<'input> = {
+	<group:StatementGroup> <expr:StrongExpression?> => StatementGroup {
+		group,
+		ret: expr.map(Box::new),
+	},
 }
 
 #[inline]

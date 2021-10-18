@@ -34,6 +34,15 @@ pub enum Token<'input> {
     #[token("fn", priority = 100)]
     #[display(fmt = "fn")]
     Fn,
+    #[token("true", priority = 100)]
+    #[display(fmt = "true")]
+    True,
+    #[token("false", priority = 100)]
+    #[display(fmt = "false")]
+    False,
+    #[token("bool", priority = 100)]
+    #[display(fmt = "bool")]
+    Bool,
     #[token(">")]
     #[display(fmt = ">")]
     OutRedir,

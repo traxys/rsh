@@ -360,6 +360,7 @@ pub enum Value<'input> {
     String(CowStr<'input>),
     Int(i64),
     List(Vec<Expression<'input>>),
+    Bool(bool),
 }
 
 impl<'input> Value<'input> {
@@ -368,6 +369,7 @@ impl<'input> Value<'input> {
             Value::String(s) => Value::String(cow_to_owned(s)),
             Value::Int(i) => Value::Int(i),
             Value::List(l) => Value::List(convert_vec(l, |e| e.owned())),
+            Value::Bool(b) => Value::Bool(b),
         }
     }
 
@@ -378,6 +380,7 @@ impl<'input> Value<'input> {
             ast::Value::List(l) => Ok(Self::List(try_convert_vec(l, |v| {
                 Expression::from_ast(v, sh_ctx)
             })?)),
+            ast::Value::Bool(b) => Ok(Self::Bool(b)),
         }
     }
 }
@@ -401,11 +404,15 @@ pub enum Expression<'input> {
     FuncDef {
         args: Vec<(Spur, Type)>,
         ret: Type,
-        body: Vec<Statement<'input>>,
-        retexpr: Option<Box<Expression<'input>>>,
+        body: StatementGroup<'input>,
     },
     #[serde(borrow)]
     Unwrap(Box<Expression<'input>>),
+    Cond {
+        cond: Box<Expression<'input>>,
+        br_if: StatementGroup<'input>,
+        br_else: StatementGroup<'input>,
+    },
 }
 
 impl<'a> Expression<'a> {
@@ -424,18 +431,21 @@ impl<'a> Expression<'a> {
             Expression::Interpolated(i) => Expression::Interpolated(convert_vec(i, |p| p.owned())),
             Expression::SubShell(ctx) => Expression::SubShell(Box::new(ctx.owned())),
             Expression::Variable(v) => Expression::Variable(v),
-            Expression::FuncDef {
+            Expression::FuncDef { args, ret, body } => Expression::FuncDef {
                 args,
                 ret,
-                body,
-                retexpr,
-            } => Expression::FuncDef {
-                args,
-                ret,
-                body: convert_vec(body, |s| s.owned()),
-                retexpr: retexpr.map(|e| Box::new(e.owned())),
+                body: body.owned(),
             },
             Expression::Unwrap(v) => Expression::Unwrap(Box::new(v.owned())),
+            Expression::Cond {
+                br_if,
+                br_else,
+                cond,
+            } => Expression::Cond {
+                br_if: br_if.owned(),
+                br_else: br_else.owned(),
+                cond: Box::new(cond.owned()),
+            },
         }
     }
 }
@@ -460,23 +470,62 @@ impl<'a> Expression<'a> {
                 *c, sh_ctx,
             )?))),
             ast::Expression::Variable(v) => Ok(Self::Variable(v)),
-            ast::Expression::FuncDef {
+            ast::Expression::FuncDef { args, ret, body } => Ok(Self::FuncDef {
                 args,
                 ret,
-                body,
-                retexpr,
-            } => Ok(Self::FuncDef {
-                args,
-                ret,
-                body: try_convert_vec(body, |s| Statement::from_ast(s, sh_ctx))?,
-                retexpr: retexpr
-                    .map(|e| Expression::from_ast(*e, sh_ctx))
-                    .transpose()?
-                    .map(Box::new),
+                body: StatementGroup::from_ast(body, sh_ctx)?,
             }),
             ast::Expression::Unwrap(e) => {
                 Ok(Self::Unwrap(Box::new(Expression::from_ast(*e, sh_ctx)?)))
             }
+            ast::Expression::Cond {
+                br_if,
+                br_else,
+                cond,
+            } => Ok(Self::Cond {
+                br_if: StatementGroup::from_ast(br_if, sh_ctx)?,
+                br_else: StatementGroup::from_ast(br_else, sh_ctx)?,
+                cond: Box::new(Expression::from_ast(*cond, sh_ctx)?),
+            }),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatementGroup<'input> {
+    #[serde(borrow)]
+    pub group: Vec<Statement<'input>>,
+    #[serde(borrow)]
+    pub ret: Option<Box<Expression<'input>>>,
+}
+
+impl<'input> StatementGroup<'input> {
+    fn from_ast(
+        statement_group: ast::StatementGroup<'input>,
+        sh_ctx: &mut ShellContext,
+    ) -> AstResult<Self> {
+        Ok(Self {
+            group: try_convert_vec(statement_group.group, |v| Statement::from_ast(v, sh_ctx))?,
+            ret: statement_group
+                .ret
+                .map(|e| Expression::from_ast(*e, sh_ctx))
+                .transpose()?
+                .map(Box::new),
+        })
+    }
+
+    pub fn owned<'b>(self) -> StatementGroup<'b> {
+        StatementGroup {
+            group: convert_vec(self.group, |v| v.owned()),
+            ret: self.ret.map(|v| Box::new(v.owned())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Branch<'input> {
+    #[serde(borrow)]
+    If(Vec<Statement<'input>>),
+    #[serde(borrow)]
+    Loop(Vec<Statement<'input>>),
 }

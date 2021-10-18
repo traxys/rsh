@@ -247,12 +247,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                 })
             }
             // Todo: typecheck the body
-            cow_ast::Expression::FuncDef {
-                args,
-                ret,
-                body: _,
-                retexpr: _,
-            } => Ok(Type::Function {
+            cow_ast::Expression::FuncDef { args, ret, body: _ } => Ok(Type::Function {
                 ret: Box::new(ret.clone()),
                 args: args.iter().map(|(_, t)| t.clone()).collect(),
             }),
@@ -263,6 +258,49 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                     got: invalid,
                 }]),
             },
+            cow_ast::Expression::Cond {
+                cond,
+                br_if,
+                br_else,
+            } => {
+                let (cty, (ifty, elsty)) = merge_errors(
+                    self.check_expression(cond),
+                    merge_errors(
+                        self.check_statement_group(br_if),
+                        self.check_statement_group(br_else),
+                    ),
+                )?;
+
+                let (_, retty) = merge_errors(
+                    match Type::Bool.is_compatible(&cty) {
+                        TypeCheck::Runtime | TypeCheck::Compatible => Ok(()),
+                        TypeCheck::Incompatible => Err(vec![TypeError::Mismatch {
+                            expected: Type::Bool,
+                            got: cty,
+                        }]),
+                    },
+                    match ifty.is_compatible(&elsty) {
+                        TypeCheck::Compatible | TypeCheck::Runtime => Ok(ifty),
+                        TypeCheck::Incompatible => Err(vec![TypeError::Mismatch {
+                            expected: ifty,
+                            got: elsty,
+                        }]),
+                    },
+                )?;
+
+                Ok(retty)
+            }
+        }
+    }
+
+    fn check_statement_group(
+        &mut self,
+        statement_group: &cow_ast::StatementGroup,
+    ) -> TypeCheckResult<Type> {
+        // Todo check statements
+        match &statement_group.ret {
+            None => Ok(Type::Unit),
+            Some(v) => self.check_expression(&v),
         }
     }
 
@@ -282,6 +320,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                 }
                 Ok(Type::List(Box::new(ty)))
             }
+            cow_ast::Value::Bool(_) => Ok(Type::Bool),
         }
     }
 

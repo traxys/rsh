@@ -1,6 +1,6 @@
 use crate::{
     ast::TypeCheck,
-    cow_ast::{self, RedirectionType, Statement, Type},
+    cow_ast::{self, RedirectionType, Statement, StatementGroup, Type},
     type_checker::{TypeCheckerCtx, TypeError},
     Builtin, ShellContext,
 };
@@ -57,6 +57,7 @@ enum Value {
     Iterator(IteratorValue),
     Option(Option<Gc<Value>>),
     Private(PrivateValue),
+    Bool(bool),
     Unit,
 }
 
@@ -133,6 +134,7 @@ impl Serialize for Value {
                 "private values are not serializable",
             )),
             Value::Unit => serializer.serialize_unit(),
+            Value::Bool(b) => serializer.serialize_bool(*b),
         }
     }
 }
@@ -205,6 +207,7 @@ impl Value {
             .into(),
             Value::Private(_) => "<private>".to_owned().into(),
             Value::Unit => "()".to_owned().into(),
+            Value::Bool(b) => b.to_string().into(),
         }
     }
 
@@ -234,6 +237,7 @@ impl Value {
             Value::Iterator { .. } => todo!(),
             Value::Private(_) => Type::Private,
             Value::Unit => Type::Unit,
+            Value::Bool(_) => Type::Bool,
         }
     }
 
@@ -312,6 +316,10 @@ impl Value {
         Str | expected Type::String
     });
 
+    as_ty!(fn as_bool -> bool {
+        Bool | expected Type::Bool
+    });
+
     /* as_ty!(fn as_priv -> PrivateValue {
         Private | expected Type::Private
     }); */
@@ -328,8 +336,7 @@ impl Value {
 struct Closure<'input> {
     ret: Type,
     args: Vec<(Spur, Type)>,
-    body: Vec<Statement<'input>>,
-    retexpr: Option<cow_ast::Expression<'input>>,
+    body: StatementGroup<'input>,
     captures: Vec<(Spur, Gc<Value>)>,
 }
 
@@ -386,9 +393,12 @@ impl CaptureCtx {
         }
     }
 
-    fn process_body(&mut self, body: &[Statement]) {
-        for stmt in body {
+    fn process_body(&mut self, body: &StatementGroup) {
+        for stmt in &body.group {
             self.process_statement(stmt);
+        }
+        if let Some(e) = &body.ret {
+            self.process_expr(e);
         }
     }
 
@@ -476,6 +486,7 @@ impl CaptureCtx {
             cow_ast::Expression::Value(v) => match v {
                 cow_ast::Value::String(_) => (),
                 cow_ast::Value::Int(_) => (),
+                cow_ast::Value::Bool(_) => (),
                 cow_ast::Value::List(l) => {
                     for expr in l {
                         self.process_expr(expr);
@@ -498,21 +509,28 @@ impl CaptureCtx {
             cow_ast::Expression::Interpolated(parts) => self.process_string_parts(parts),
             cow_ast::Expression::SubShell(cmd_ctx) => self.process_cmd_ctx(cmd_ctx),
             cow_ast::Expression::Variable(name) => self.process_id(*name),
-            cow_ast::Expression::FuncDef {
-                args,
-                ret: _,
-                body,
-                retexpr,
-            } => {
+            cow_ast::Expression::FuncDef { args, ret: _, body } => {
                 self.defined
                     .push(args.iter().map(|(name, _)| *name).collect());
                 self.process_body(body);
-                if let Some(e) = retexpr {
-                    self.process_expr(e);
-                }
                 self.defined.pop();
             }
             cow_ast::Expression::Unwrap(v) => self.process_expr(v),
+            cow_ast::Expression::Cond {
+                cond,
+                br_if,
+                br_else,
+            } => {
+                self.process_expr(cond);
+
+                self.defined.push(HashSet::new());
+                self.process_body(br_if);
+                self.defined.pop();
+
+                self.defined.push(HashSet::new());
+                self.process_body(br_else);
+                self.defined.pop();
+            }
         }
     }
 
@@ -639,22 +657,10 @@ impl<'input> RuntimeCtx<'input> {
         self.overlays.push(overlay);
     }
 
-    fn enter_single_overlay(&mut self, definition: cow_ast::VariableDefinition<'input>) {
-        let overlay = Overlay {
-            values: HashMap::new(),
-            definitions: {
-                let mut map = HashMap::new();
-                map.insert(definition.name, definition.expr);
-                map
-            },
-            types: {
-                let mut map = HashMap::new();
-                map.insert(definition.name, definition.ty);
-                map
-            },
-            currently_evaluating: HashSet::new(),
-        };
-        self.overlays.push(overlay);
+    fn add_to_overlay(&mut self, definition: cow_ast::VariableDefinition<'input>) {
+        let ov = self.overlays.last_mut().unwrap();
+        ov.definitions.insert(definition.name, definition.expr);
+        ov.types.insert(definition.name, definition.ty);
     }
 
     pub(crate) fn prepare_cmd(
@@ -1025,14 +1031,17 @@ impl<'input> RuntimeCtx<'input> {
             exit: self.exit,
         };
 
-        for statement in &f.body {
+        for statement in &f.body.group {
             match func_ctx.run_statement(statement)? {
                 StatementExec::NoAction => (),
                 StatementExec::Return(_) => todo!(),
             }
         }
 
-        Ok(Gc::new(Value::Unit))
+        match &f.body.ret {
+            Some(v) => func_ctx.eval_expr(v),
+            None => Ok(Gc::new(Value::Unit)),
+        }
     }
 
     fn call_function_value(
@@ -1065,6 +1074,7 @@ impl<'input> RuntimeCtx<'input> {
                         .map(|expr| -> RuntimeResult<_> { Ok(GcCell::new(self.eval_expr(expr)?)) })
                         .collect::<RuntimeResult<_>>()?,
                 )))),
+                cow_ast::Value::Bool(b) => Ok(Gc::new(Value::Bool(*b))),
             },
             cow_ast::Expression::Call { function, args } => {
                 let function = self.eval_expr(function)?;
@@ -1102,12 +1112,7 @@ impl<'input> RuntimeCtx<'input> {
                         .to_owned(),
                 ))
             }),
-            cow_ast::Expression::FuncDef {
-                args,
-                ret,
-                body,
-                retexpr,
-            } => {
+            cow_ast::Expression::FuncDef { args, ret, body } => {
                 let idx = self.closures.len();
 
                 let mut capture_ctx = CaptureCtx {
@@ -1143,7 +1148,6 @@ impl<'input> RuntimeCtx<'input> {
                     ret: ret.clone(),
                     args: args.clone(),
                     body: body.clone(),
-                    retexpr: retexpr.as_ref().map(|v| (**v).clone()),
                     captures,
                 });
                 Ok(Gc::new(Value::Function(FunctionValue::User(idx))))
@@ -1161,6 +1165,21 @@ impl<'input> RuntimeCtx<'input> {
                     }),
                 }
             }
+            cow_ast::Expression::Cond {
+                cond,
+                br_if,
+                br_else,
+            } => {
+                let cond = *self
+                    .eval_expr(cond)?
+                    .as_bool(&self.closures, self.shell_ctx)?;
+
+                if cond {
+                    self.run_statement_group(br_if)
+                } else {
+                    self.run_statement_group(br_else)
+                }
+            }
         }
     }
 
@@ -1172,10 +1191,30 @@ impl<'input> RuntimeCtx<'input> {
         Ok(())
     }
 
+    fn run_statement_group(
+        &mut self,
+        statement_group: &StatementGroup<'input>,
+    ) -> RuntimeResult<Gc<Value>> {
+        self.enter_overlay(Vec::new());
+
+        for stmt in &statement_group.group {
+            self.run_statement(stmt)?;
+        }
+
+        let ret = match &statement_group.ret {
+            None => Ok(Gc::new(Value::Unit)),
+            Some(e) => self.eval_expr(e),
+        };
+
+        self.overlays.pop();
+
+        ret
+    }
+
     fn run_statement(&mut self, statement: &Statement<'input>) -> RuntimeResult<StatementExec> {
         match statement {
             Statement::VarDef(v) => {
-                self.enter_single_overlay(v.clone());
+                self.add_to_overlay(v.clone());
             }
             Statement::Cmd { blk, capture: None } => {
                 for cmd in blk {
