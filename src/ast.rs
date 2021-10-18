@@ -70,9 +70,10 @@ impl Type {
         match (self, expr_ty) {
             (Self::Dynamic, _) => TypeCheck::Compatible,
             (_, Self::Dynamic) => TypeCheck::Runtime,
+            (Self::Bool, Self::Bool) => TypeCheck::Compatible,
             (Self::Int, Self::Int) => TypeCheck::Compatible,
             (Self::String | Self::Bytes, Self::String | Self::Bytes) => TypeCheck::Compatible,
-            (Self::Function { .. }, Self::Function { .. }) => TypeCheck::Compatible,
+            (Self::Function { .. }, Self::Function { .. }) => TypeCheck::Runtime,
             (Self::Unit, Self::Unit) => TypeCheck::Compatible,
             (Self::List(s), Self::List(e)) => s.is_compatible(e),
             _ => TypeCheck::Incompatible,

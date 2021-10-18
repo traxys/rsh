@@ -26,6 +26,8 @@ extern {
 	type Error = LexerError;
 
 	enum lexer::Token<'input> {
+		"if" => lexer::Token::If,
+		"else" => lexer::Token::Else,
 		"true" => lexer::Token::True,
 		"false" => lexer::Token::False,
 		"bool" => lexer::Token::Bool,
@@ -132,6 +134,13 @@ pub(crate) StrongExpression: Expression<'input> = {
 			body,
 		},
 	<expr:StrongExpression> "!" => Expression::Unwrap(Box::new(expr)),
+	"if" <cond:StrongExpression> 
+		"{" <br_if:ExpressionGroup> "}" "else" 
+		"{" <br_else:ExpressionGroup> "}" => Expression::Cond {
+		cond: Box::new(cond),
+		br_if,
+		br_else
+	}
 };
 
 Ret: Type = {

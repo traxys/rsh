@@ -43,6 +43,12 @@ pub enum Token<'input> {
     #[token("bool", priority = 100)]
     #[display(fmt = "bool")]
     Bool,
+    #[token("if", priority = 100)]
+    #[display(fmt = "if")]
+    If,
+    #[token("else", priority = 100)]
+    #[display(fmt = "else")]
+    Else,
     #[token(">")]
     #[display(fmt = ">")]
     OutRedir,
