@@ -247,7 +247,12 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                 })
             }
             // Todo: typecheck the body
-            cow_ast::Expression::FuncDef { args, ret, body: _ } => Ok(Type::Function {
+            cow_ast::Expression::FuncDef {
+                args,
+                ret,
+                body: _,
+                retexpr: _,
+            } => Ok(Type::Function {
                 ret: Box::new(ret.clone()),
                 args: args.iter().map(|(_, t)| t.clone()).collect(),
             }),

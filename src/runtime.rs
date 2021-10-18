@@ -329,6 +329,7 @@ struct Closure<'input> {
     ret: Type,
     args: Vec<(Spur, Type)>,
     body: Vec<Statement<'input>>,
+    retexpr: Option<cow_ast::Expression<'input>>,
     captures: Vec<(Spur, Gc<Value>)>,
 }
 
@@ -497,10 +498,18 @@ impl CaptureCtx {
             cow_ast::Expression::Interpolated(parts) => self.process_string_parts(parts),
             cow_ast::Expression::SubShell(cmd_ctx) => self.process_cmd_ctx(cmd_ctx),
             cow_ast::Expression::Variable(name) => self.process_id(*name),
-            cow_ast::Expression::FuncDef { args, ret: _, body } => {
+            cow_ast::Expression::FuncDef {
+                args,
+                ret: _,
+                body,
+                retexpr,
+            } => {
                 self.defined
                     .push(args.iter().map(|(name, _)| *name).collect());
                 self.process_body(body);
+                if let Some(e) = retexpr {
+                    self.process_expr(e);
+                }
                 self.defined.pop();
             }
             cow_ast::Expression::Unwrap(v) => self.process_expr(v),
@@ -1093,7 +1102,12 @@ impl<'input> RuntimeCtx<'input> {
                         .to_owned(),
                 ))
             }),
-            cow_ast::Expression::FuncDef { args, ret, body } => {
+            cow_ast::Expression::FuncDef {
+                args,
+                ret,
+                body,
+                retexpr,
+            } => {
                 let idx = self.closures.len();
 
                 let mut capture_ctx = CaptureCtx {
@@ -1129,6 +1143,7 @@ impl<'input> RuntimeCtx<'input> {
                     ret: ret.clone(),
                     args: args.clone(),
                     body: body.clone(),
+                    retexpr: retexpr.as_ref().map(|v| (**v).clone()),
                     captures,
                 });
                 Ok(Gc::new(Value::Function(FunctionValue::User(idx))))

@@ -182,7 +182,19 @@ pub enum Expression<'input> {
         args: Vec<(Spur, Type)>,
         ret: Type,
         body: Vec<Statement<'input>>,
+        retexpr: Option<Box<Expression<'input>>>,
     },
     #[serde(borrow)]
     Unwrap(Box<Expression<'input>>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Branch<'input> {
+    If {
+        #[serde(borrow)]
+        if_branch: Vec<Statement<'input>>,
+        #[serde(borrow)]
+        else_branch: Option<Vec<Statement<'input>>>,
+    },
+    Loop(Vec<Statement<'input>>),
 }

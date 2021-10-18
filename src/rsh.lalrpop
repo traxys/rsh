@@ -119,11 +119,12 @@ pub(crate) StrongExpression: Expression<'input> = {
 		args,
 	},
 	<id:Identifier> => Expression::Variable(id),
-	"fn" "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:Script> "}" => 
+	"fn" "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:ExpressionGroup> "}" => 
 		Expression::FuncDef {
 			args, 
 			ret: ret.unwrap_or(Type::Unit), 
-			body
+			body: body.0,
+			retexpr: body.1.map(Box::new),
 		},
 	<expr:StrongExpression> "!" => Expression::Unwrap(Box::new(expr)),
 };
@@ -230,7 +231,8 @@ Statement: Statement<'input> = {
 	<CmdBlk> => Statement::Cmd{blk: <>, capture: None},
 	"capture" "(" <capture:Identifier> ")" <blk:CmdBlk> => Statement::Cmd{blk, capture: Some(capture)},
 	<e:StrongExpression> ";" => Statement::Expr(e),
-	"fn" <name:Identifier> "(" <args:Comma<Arg>> ")" <ret:Ret?> "{" <body:Script> "}" => Statement::VarDef(
+	"fn" <name:Identifier> "(" <args:Comma<Arg>> ")" <ret:Ret?> 
+		"{" <body:ExpressionGroup> "}" => Statement::VarDef(
 		VariableDefinition {
 			name,
 			ty: Type::Function { 
@@ -240,16 +242,27 @@ Statement: Statement<'input> = {
 			expr: Expression::FuncDef {
 				ret: ret.unwrap_or(Type::Unit),
 				args, 
-				body,
+				body: body.0,
+				retexpr: body.1.map(Box::new),
 			},
 		}
 	),
 };
 
-StatementLine: Statement<'input> = {
-	<s:Statement> <_nl:"\n"*> => s,
+StatementLine: Option<Statement<'input>> = {
+	<_nl:"\n"> => None,
+	<s:Statement> => Some(s),
 };
 
+ExpressionGroup: (Vec<Statement<'input>>, Option<Expression<'input>>) = {
+	<group:StatementGroup> <expr:StrongExpression?> => (group, expr),
+}
+
+#[inline]
+StatementGroup: Vec<Statement<'input>> = {
+	<s:StatementLine*> => s.into_iter().filter_map(|o| o).collect()
+}
+
 pub Script: Vec<Statement<'input>> = {
-	<_nl:"\n"*> <s:StatementLine*> => s,
+	StatementGroup => <>,
 }

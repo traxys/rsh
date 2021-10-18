@@ -402,6 +402,7 @@ pub enum Expression<'input> {
         args: Vec<(Spur, Type)>,
         ret: Type,
         body: Vec<Statement<'input>>,
+        retexpr: Option<Box<Expression<'input>>>,
     },
     #[serde(borrow)]
     Unwrap(Box<Expression<'input>>),
@@ -423,10 +424,16 @@ impl<'a> Expression<'a> {
             Expression::Interpolated(i) => Expression::Interpolated(convert_vec(i, |p| p.owned())),
             Expression::SubShell(ctx) => Expression::SubShell(Box::new(ctx.owned())),
             Expression::Variable(v) => Expression::Variable(v),
-            Expression::FuncDef { args, ret, body } => Expression::FuncDef {
+            Expression::FuncDef {
+                args,
+                ret,
+                body,
+                retexpr,
+            } => Expression::FuncDef {
                 args,
                 ret,
                 body: convert_vec(body, |s| s.owned()),
+                retexpr: retexpr.map(|e| Box::new(e.owned())),
             },
             Expression::Unwrap(v) => Expression::Unwrap(Box::new(v.owned())),
         }
@@ -453,10 +460,19 @@ impl<'a> Expression<'a> {
                 *c, sh_ctx,
             )?))),
             ast::Expression::Variable(v) => Ok(Self::Variable(v)),
-            ast::Expression::FuncDef { args, ret, body } => Ok(Self::FuncDef {
+            ast::Expression::FuncDef {
+                args,
+                ret,
+                body,
+                retexpr,
+            } => Ok(Self::FuncDef {
                 args,
                 ret,
                 body: try_convert_vec(body, |s| Statement::from_ast(s, sh_ctx))?,
+                retexpr: retexpr
+                    .map(|e| Expression::from_ast(*e, sh_ctx))
+                    .transpose()?
+                    .map(Box::new),
             }),
             ast::Expression::Unwrap(e) => {
                 Ok(Self::Unwrap(Box::new(Expression::from_ast(*e, sh_ctx)?)))
