@@ -149,6 +149,8 @@ pub enum Statement<'input> {
     },
     #[serde(borrow)]
     Expr(Expression<'input>),
+    #[serde(borrow)]
+    Branch(Branch<'input>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

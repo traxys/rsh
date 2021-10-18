@@ -49,6 +49,9 @@ pub enum Token<'input> {
     #[token("else", priority = 100)]
     #[display(fmt = "else")]
     Else,
+    #[token("loop", priority = 100)]
+    #[display(fmt = "loop")]
+    Loop,
     #[token(">")]
     #[display(fmt = ">")]
     OutRedir,

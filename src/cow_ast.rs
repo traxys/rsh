@@ -332,6 +332,8 @@ pub enum Statement<'input> {
     },
     #[serde(borrow)]
     Expr(Expression<'input>),
+    #[serde(borrow)]
+    Branch(Branch<'input>),
 }
 
 impl<'a> Statement<'a> {
@@ -347,6 +349,7 @@ impl<'a> Statement<'a> {
                 lhs: lhs.owned(),
                 rhs: rhs.owned(),
             },
+            Statement::Branch(b) => Statement::Branch(b.owned()),
         }
     }
 
@@ -362,6 +365,7 @@ impl<'a> Statement<'a> {
                 lhs: Expression::from_ast(lhs, sh_ctx)?,
                 rhs: Expression::from_ast(rhs, sh_ctx)?,
             }),
+            ast::Statement::Branch(b) => Ok(Self::Branch(Branch::from_ast(b, sh_ctx)?)),
         }
     }
 }
@@ -540,4 +544,22 @@ pub enum Branch<'input> {
     If(Vec<Statement<'input>>),
     #[serde(borrow)]
     Loop(Vec<Statement<'input>>),
+}
+
+impl<'input> Branch<'input> {
+    fn from_ast(branch: ast::Branch<'input>, sh_ctx: &mut ShellContext) -> AstResult<Self> {
+        match branch {
+            ast::Branch::If(_) => todo!(),
+            ast::Branch::Loop(block) => Ok(Self::Loop(try_convert_vec(block, |s| {
+                Statement::from_ast(s, sh_ctx)
+            })?)),
+        }
+    }
+
+    pub fn owned<'b>(self) -> Branch<'b> {
+        match self {
+            Branch::If(_) => todo!(),
+            Branch::Loop(block) => Branch::Loop(convert_vec(block, |s| s.owned())),
+        }
+    }
 }

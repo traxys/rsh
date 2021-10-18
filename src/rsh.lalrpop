@@ -16,6 +16,7 @@ use crate::{
 		Statement,
 		StatementGroup,
 		CommandStatement,
+		Branch,
 	}
 };
 use std::borrow::Cow;
@@ -27,6 +28,7 @@ extern {
 
 	enum lexer::Token<'input> {
 		"if" => lexer::Token::If,
+		"loop" => lexer::Token::Loop,
 		"else" => lexer::Token::Else,
 		"true" => lexer::Token::True,
 		"false" => lexer::Token::False,
@@ -241,6 +243,10 @@ CmdBlk: Vec<CommandStatement<'input>> = {
 	"cmd" "{" <_nl:"\n"?> <cmds:CmdBlockContent> "}" => cmds,
 }
 
+Branch: Branch<'input> = {
+	"loop" "{" <body:StatementGroup> "}" => Branch::Loop(body),
+}
+
 Statement: Statement<'input> = {
 	"let" <VariableDefinition> ";" => Statement::VarDef(<>),
 	<CmdBlk> => Statement::Cmd{blk: <>, capture: None},
@@ -265,7 +271,8 @@ Statement: Statement<'input> = {
 		Statement::Assign {
 			lhs,
 			rhs,
-		}
+		},
+	<b:Branch> => Statement::Branch(b),
 };
 
 StatementLine: Option<Statement<'input>> = {

@@ -345,6 +345,7 @@ struct Closure<'input> {
 #[derive(Debug)]
 enum StatementExec {
     NoAction,
+    Break(Value),
     Return(Value),
 }
 
@@ -424,6 +425,20 @@ impl CaptureCtx {
             Statement::Assign { lhs, rhs } => {
                 self.process_expr(rhs);
                 self.process_expr(lhs);
+            }
+            Statement::Branch(b) => self.process_branch(b),
+        }
+    }
+
+    fn process_branch(&mut self, branch: &cow_ast::Branch) {
+        match branch {
+            cow_ast::Branch::If(_) => todo!(),
+            cow_ast::Branch::Loop(l) => {
+                for s in l {
+                    self.defined.push(HashSet::new());
+                    self.process_statement(s);
+                    self.defined.pop();
+                }
             }
         }
     }
@@ -1041,6 +1056,7 @@ impl<'input> RuntimeCtx<'input> {
             match func_ctx.run_statement(statement)? {
                 StatementExec::NoAction => (),
                 StatementExec::Return(_) => todo!(),
+                StatementExec::Break(_) => todo!(),
             }
         }
 
@@ -1244,8 +1260,30 @@ impl<'input> RuntimeCtx<'input> {
                 let value = self.eval_expr(rhs)?;
                 self.assign(lhs, value)?;
             }
+            Statement::Branch(b) => self.run_branch(b)?,
         }
         Ok(StatementExec::NoAction)
+    }
+
+    fn run_branch(&mut self, branch: &cow_ast::Branch<'input>) -> RuntimeResult<()> {
+        match branch {
+            cow_ast::Branch::If(_) => todo!(),
+            cow_ast::Branch::Loop(block) => {
+                self.enter_overlay(Vec::new());
+                'outer: loop {
+                    for b in block {
+                        match self.run_statement(b)? {
+                            StatementExec::Break(_) => break 'outer,
+                            StatementExec::Return(_) => todo!(),
+                            StatementExec::NoAction => (),
+                        }
+                    }
+                }
+                self.overlays.pop();
+            }
+        }
+
+        Ok(())
     }
 
     fn assign(
