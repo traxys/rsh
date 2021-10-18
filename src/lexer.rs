@@ -79,7 +79,7 @@ pub enum Token<'input> {
     #[regex("[a-zA-Z0-9_]+", priority = 10)]
     #[display(fmt = "identifier({})", _0)]
     Identifier(&'input str),
-    #[regex(r"[\w\d:+\-_/.$]+", callback = |lex| lex.slice())]
+    #[regex(r"[\w\d+\-_/.$]+", callback = |lex| lex.slice())]
     #[display(fmt = "word({})", _0)]
     Word(&'input str),
     #[token("$(")]
