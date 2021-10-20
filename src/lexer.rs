@@ -147,7 +147,7 @@ pub enum Token<'input> {
 }
 
 fn escape_string(input: &str) -> Cow<'_, str> {
-    if !input.contains("\\") {
+    if !input.contains('\\') {
         Cow::Borrowed(input)
     } else {
         let mut val = Vec::new();
@@ -173,9 +173,7 @@ fn escape_string(input: &str) -> Cow<'_, str> {
     }
 }
 
-pub fn lexer<'input>(
-    input: &'input str,
-) -> impl Iterator<Item = Spanned<Token<'input>, usize, LexerError>> + 'input {
+pub fn lexer(input: &str) -> impl Iterator<Item = Spanned<Token<'_>, usize, LexerError>> + '_ {
     Token::lexer(input)
         .spanned()
         /* .inspect(|x| {

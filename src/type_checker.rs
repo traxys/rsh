@@ -187,7 +187,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
                 let ret_ty = match func_ty {
                     Type::Function { ret, args } => {
                         fold_errors(
-                            args.into_iter()
+                            args.iter()
                                 .zip(std::iter::once(value_ty).chain(args_ty)),
                             |(expected, got)| match expected.is_compatible(&got) {
                                 TypeCheck::Compatible | TypeCheck::Runtime => Ok(()),
@@ -300,7 +300,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
         // Todo check statements
         match &statement_group.ret {
             None => Ok(Type::Unit),
-            Some(v) => self.check_expression(&v),
+            Some(v) => self.check_expression(v),
         }
     }
 
@@ -309,7 +309,7 @@ impl<'ctx> TypeCheckerCtx<'ctx> {
             cow_ast::Value::String(_) => Ok(Type::String),
             cow_ast::Value::Int(_) => Ok(Type::Int),
             cow_ast::Value::List(l) => {
-                if l.len() == 0 {
+                if l.is_empty() {
                     return Ok(Type::List(Box::new(Type::Dynamic)));
                 }
                 let ty = self.check_expression(l.first().unwrap())?;

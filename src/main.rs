@@ -26,7 +26,7 @@ pub mod lexer;
 pub mod runtime;
 pub mod type_checker;
 
-lalrpop_mod!(pub rsh);
+lalrpop_mod!(#[allow(clippy::all)] pub rsh);
 
 type ShResult<T, E = Error> = std::result::Result<T, E>;
 
@@ -56,6 +56,12 @@ pub struct ShellContext {
     last_exit: Option<ExitStatus>,
     rodeo: Rodeo,
     interrupted: &'static AtomicBool,
+}
+
+impl Default for ShellContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShellContext {
@@ -93,7 +99,7 @@ fn interactive_input(
     match rl.load_history("/home/traxys/.rsh-history") {
         Ok(_) => (),
         Err(ReadlineError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (),
-        Err(e) => Err(e)?,
+        Err(e) => return Err(e.into()),
     }
     let res = interactive_loop(&mut rl, sh_ctx, prompt_command);
     rl.save_history("/home/traxys/.rsh-history")?;
@@ -114,7 +120,7 @@ fn interactive_loop<E: rustyline::Helper>(
                 let command = &command;
                 let parsed = cow_ast::Command::from_ast(
                     command_parser
-                        .parse(rt_ctx.shell_ctx, command, lexer::lexer(&command))
+                        .parse(rt_ctx.shell_ctx, command, lexer::lexer(command))
                         .map_err(|err| {
                             color_eyre::eyre::eyre!("could not parse prompt: {}", err)
                         })?,
@@ -136,7 +142,7 @@ fn interactive_loop<E: rustyline::Helper>(
             Ok(line) => {
                 let line = &line;
                 let parsed: cow_ast::CommandStatement = match rsh::CommandStatementParser::new()
-                    .parse(rt_ctx.shell_ctx, line, lexer::lexer(&line))
+                    .parse(rt_ctx.shell_ctx, line, lexer::lexer(line))
                 {
                     Err(e) => {
                         println!("  Parse Error: {}", yansi::Paint::red(e.to_string()));
@@ -161,7 +167,7 @@ fn interactive_loop<E: rustyline::Helper>(
             }
             Err(ReadlineError::Interrupted) => (),
             Err(ReadlineError::Eof) => return Ok(0),
-            Err(err) => Err(err)?,
+            Err(err) => return Err(err.into()),
         }
     }
 }
@@ -209,7 +215,7 @@ impl Builtin {
             } => {
                 let code = &code;
                 let parsed = rsh::CommandContextParser::new()
-                    .parse(shell_ctx, code, lexer::lexer(&code))
+                    .parse(shell_ctx, code, lexer::lexer(code))
                     .map_err(|err| Error::Parse(err.to_string()))?;
                 match format {
                     AstFormat::Ron => println!(
@@ -242,10 +248,7 @@ impl Builtin {
     }
 
     pub fn is(name: &str) -> bool {
-        match name {
-            "ast" | "run-ast" => true,
-            _ => false,
-        }
+        matches!(name, "ast" | "run-ast")
     }
 }
 
@@ -295,12 +298,12 @@ fn main() -> color_eyre::Result<()> {
         dbg!(report!(command_parser.parse(
             &mut shell_ctx,
             command,
-            lexer::lexer(&command)
+            lexer::lexer(command)
         )));
     } else if let Some(script) = args.file {
         let script = &std::fs::read_to_string(script)?;
         let parsed =
-            report!(rsh::ScriptParser::new().parse(&mut shell_ctx, script, lexer::lexer(&script)));
+            report!(rsh::ScriptParser::new().parse(&mut shell_ctx, script, lexer::lexer(script)));
         let mut rt_ctx = RuntimeCtx::new(&mut shell_ctx);
         let parsed = parsed
             .into_iter()

@@ -259,7 +259,7 @@ impl Value {
             (Value::Bytes(_), Type::String | Type::Bytes) => Ok(()),
             (Value::Unit, Type::Unit) => Ok(()),
             (Value::Option(inner), Type::Option(inner_ty)) => match inner {
-                Some(inner) => inner.type_checks(&inner_ty, closures, sh_ctx),
+                Some(inner) => inner.type_checks(inner_ty, closures, sh_ctx),
                 None => Ok(()),
             },
             (Value::Private(_), _) => todo!(),
@@ -634,8 +634,7 @@ impl<'input> RuntimeCtx<'input> {
             4 => {
                 check_args(1, &args)?;
                 let it = args[0].as_iter(&self.closures, self.shell_ctx)?;
-                let next = self.call_function_value(&it.next, vec![args[0].clone()]);
-                next
+                self.call_function_value(&it.next, vec![args[0].clone()])
             }
             // print
             // TODO: capture print when required
@@ -732,7 +731,7 @@ impl<'input> RuntimeCtx<'input> {
         cmd.args(args.iter().map(|x| x.as_ref()));
 
         for (ty, path) in &command.redirections {
-            let path = self.eval_expr(&path)?.to_string(self);
+            let path = self.eval_expr(path)?.to_string(self);
             match ty {
                 RedirectionType::In => {
                     let file = File::open(&*path)?;
@@ -768,7 +767,7 @@ impl<'input> RuntimeCtx<'input> {
                 last.stdout(Stdio::piped());
             }
 
-            return Ok((vec![], last));
+            Ok((vec![], last))
         } else {
             let mut children = vec![prepared[0].stdout(Stdio::piped()).spawn()?];
             let len = prepared.len();
@@ -884,7 +883,7 @@ impl<'input> RuntimeCtx<'input> {
     ) -> RuntimeResult<()> {
         TypeCheckerCtx::new(self.shell_ctx)
             .check_cmd_ctx(&cmd_ctx)
-            .map_err(|ty_errs| RuntimeError::Static(ty_errs))?;
+            .map_err(RuntimeError::Static)?;
 
         self.enter_overlay(cmd_ctx.variables);
 
@@ -1002,11 +1001,9 @@ impl<'input> RuntimeCtx<'input> {
     ) -> RuntimeResult<Gc<Value>> {
         match function {
             Value::Function(f) => self.call_function_value(f, args),
-            val => {
-                return Err(RuntimeError::UncallableType(
-                    val.ty(&self.closures, self.shell_ctx),
-                ))
-            }
+            val => Err(RuntimeError::UncallableType(
+                val.ty(&self.closures, self.shell_ctx),
+            )),
         }
     }
 
@@ -1029,7 +1026,7 @@ impl<'input> RuntimeCtx<'input> {
                 HashMap::with_capacity(args.len()),
             ),
             |(mut vals, mut tys), ((name, ty), val)| -> RuntimeResult<_> {
-                val.type_checks(&ty, closures, shell_ctx)?;
+                val.type_checks(ty, closures, shell_ctx)?;
                 vals.insert(*name, val.clone());
                 tys.insert(*name, ty.clone());
                 Ok((vals, tys))
@@ -1046,7 +1043,7 @@ impl<'input> RuntimeCtx<'input> {
         let (types, values) = f
             .captures
             .iter()
-            .map(|(name, val)| ((*name, val.ty(&closures, shell_ctx)), (*name, val.clone())))
+            .map(|(name, val)| ((*name, val.ty(closures, shell_ctx)), (*name, val.clone())))
             .unzip();
 
         let capture_overlay = Overlay {
@@ -1266,7 +1263,7 @@ impl<'input> RuntimeCtx<'input> {
                 self.set_value(*var, Value::Bytes(Rc::new(output)))?;
             }
             Statement::Expr(e) => {
-                self.eval_expr(&e)?;
+                self.eval_expr(e)?;
             }
             Statement::Assign { lhs, rhs } => {
                 let value = self.eval_expr(rhs)?;

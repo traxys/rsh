@@ -225,10 +225,7 @@ fn parse_color(json: serde_json::Value) -> Option<Color> {
     use serde_json::Value;
 
     match json {
-        Value::Number(n) => match n.as_u64() {
-            Some(n) => Some(Color::Fixed(n as u8)),
-            _ => None,
-        },
+        Value::Number(n) => n.as_u64().map(|c| Color::Fixed(c as u8)),
         Value::String(s) => match s.to_lowercase().as_str() {
             "black" => Some(Color::Black),
             "blue" => Some(Color::Blue),
@@ -239,7 +236,7 @@ fn parse_color(json: serde_json::Value) -> Option<Color> {
             "white" => Some(Color::White),
             "yellow" => Some(Color::Yellow),
             s => {
-                if let Some((red, green, blue)) = hex_string_to_rgb(&s) {
+                if let Some((red, green, blue)) = hex_string_to_rgb(s) {
                     Some(Color::RGB(red, green, blue))
                 } else {
                     None
@@ -251,7 +248,7 @@ fn parse_color(json: serde_json::Value) -> Option<Color> {
 }
 
 fn hex_string_to_rgb(s: &str) -> Option<(u8, u8, u8)> {
-    if s.starts_with("#") && s.len() >= 7 {
+    if s.starts_with('#') && s.len() >= 7 {
         if let (Ok(red), Ok(green), Ok(blue)) = (
             u8::from_str_radix(&s[1..3], 16),
             u8::from_str_radix(&s[3..5], 16),
@@ -388,7 +385,7 @@ impl Styling {
             }
 
             fn current(&self) -> &'a ansi_term::Style {
-                &self.backing[0].1
+                self.backing[0].1
             }
         }
 
@@ -463,7 +460,7 @@ impl HiTrait for Editor {
                 }
                 HighlightEvent::Source { start, end } => {
                     let style = style_stack.last().unwrap();
-                    stylings.insert(style.clone(), start..end, 1);
+                    stylings.insert(*style, start..end, 1);
                 }
             }
         }

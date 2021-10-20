@@ -45,10 +45,10 @@ impl StringPart<'static> {
             }
             idx = mtch.end();
             let match_expr = &mtch.as_str()[1..];
-            if match_expr.starts_with("{") {
+            if match_expr.starts_with('{') {
                 let input = match_expr.trim_start_matches('{').trim_end_matches('}');
                 let expr = rsh::StrongExpressionParser::new()
-                    .parse(ctx, input, lexer::lexer(&input))
+                    .parse(ctx, input, lexer::lexer(input))
                     .map_err(|_| InterpolationError)?;
                 interpolation.push(Self::Expression(Expression::from_ast(expr, ctx)?.owned()));
             } else {
@@ -75,16 +75,16 @@ impl<'input> StringPart<'input> {
         let mut idx = 0;
         let mut interpolation = Vec::new();
 
-        for mtch in INTERPOLATION_REGEX.find_iter(&s) {
+        for mtch in INTERPOLATION_REGEX.find_iter(s) {
             if mtch.start() != idx {
                 interpolation.push(Self::Text(Cow::Borrowed(&s[idx..mtch.start()])));
             }
             idx = mtch.end();
             let match_expr = &mtch.as_str()[1..];
-            if match_expr.starts_with("{") {
+            if match_expr.starts_with('{') {
                 let input = match_expr.trim_start_matches('{').trim_end_matches('}');
                 let expr = rsh::StrongExpressionParser::new()
-                    .parse(ctx, input, lexer::lexer(&input))
+                    .parse(ctx, input, lexer::lexer(input))
                     .map_err(|_| InterpolationError)?;
                 interpolation.push(Self::Expression(Expression::from_ast(expr, ctx)?));
             } else {
