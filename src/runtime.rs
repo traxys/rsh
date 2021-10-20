@@ -14,6 +14,7 @@ use std::{
     io::Read,
     process::{self, ExitStatus, Stdio},
     rc::Rc,
+    sync::atomic,
 };
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
@@ -46,6 +47,8 @@ pub enum RuntimeError {
     UnwrapedNone,
     #[error("expression is not assignable")]
     Unasignable,
+    #[error("interupted")]
+    Interupted,
 }
 
 #[derive(Debug, Clone, Trace, Finalize)]
@@ -654,6 +657,14 @@ impl<'input> RuntimeCtx<'input> {
         }
     }
 
+    fn check_interupted(&self) -> RuntimeResult<()> {
+        if self.shell_ctx.interrupted.load(atomic::Ordering::Relaxed) {
+            Err(RuntimeError::Interupted)
+        } else {
+            Ok(())
+        }
+    }
+
     fn update_overlay(&mut self, definition: cow_ast::VariableDefinition<'input>) {
         let ov = self
             .overlays
@@ -1234,6 +1245,7 @@ impl<'input> RuntimeCtx<'input> {
     }
 
     fn run_statement(&mut self, statement: &Statement<'input>) -> RuntimeResult<StatementExec> {
+        self.check_interupted()?;
         match statement {
             Statement::VarDef(v) => {
                 self.add_to_overlay(v.clone());

@@ -9,7 +9,10 @@ use std::{
     path::PathBuf,
     process::{self, ExitStatus},
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{self, AtomicBool},
+        Arc, RwLock,
+    },
 };
 use structopt::StructOpt;
 
@@ -52,6 +55,7 @@ pub struct ShellContext {
     builtins: Vec<BuiltinFunction>,
     last_exit: Option<ExitStatus>,
     rodeo: Rodeo,
+    interrupted: &'static AtomicBool,
 }
 
 impl ShellContext {
@@ -61,6 +65,7 @@ impl ShellContext {
             last_exit: None,
             rodeo: Rodeo::new(),
             builtins: builtin_functions::builtins(),
+            interrupted: Box::leak(Box::new(AtomicBool::new(false))),
         }
     }
 }
@@ -122,6 +127,10 @@ fn interactive_loop<E: rustyline::Helper>(
             })
             .unwrap_or_else(|| Ok(String::from(">> ")))?;
 
+        rt_ctx
+            .shell_ctx
+            .interrupted
+            .store(false, atomic::Ordering::Relaxed);
         let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
@@ -261,8 +270,10 @@ fn main() -> color_eyre::Result<()> {
     let args = Args::from_args();
     let mut shell_ctx = ShellContext::new();
     let cp = shell_ctx.current_process.clone();
+    let inter = shell_ctx.interrupted;
 
     ctrlc::set_handler(move || {
+        inter.store(true, atomic::Ordering::Relaxed);
         match cp.read().map_err(|e| e.into_inner()) {
             Err(e) | Ok(e) => {
                 if let Some(child) = &*e {
